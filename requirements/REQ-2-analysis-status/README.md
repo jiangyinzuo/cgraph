@@ -1,0 +1,30 @@
+# REQ-2：分析后端状态
+
+| 字段 | 值 |
+| --- | --- |
+| 状态 | `Implemented` |
+| 优先级 | `P0` |
+| 目标版本 | `0.1` |
+
+## 目标
+
+用户能够在 TUI 中判断当前由哪个源码分析后端提供能力，以及它是就绪、工作、警告、失败还是断开。
+
+## 子需求
+
+| 子需求 | 状态 | 摘要 |
+| --- | --- | --- |
+| [REQ-2-1 LSP 状态与进度](REQ-2-1-lsp-progress.md) | `Implemented` | 标准 progress、rust-analyzer 状态和断开 |
+| [REQ-2-2 Tree-sitter 状态](REQ-2-2-tree-sitter-status.md) | `Implemented` | 初始化、就绪与失败状态 |
+| [REQ-2-3 底部状态栏布局](REQ-2-3-status-window.md) | `Implemented` | 快捷键与后端状态同栏展示 |
+
+## 父需求验收
+
+- 状态模型不依赖具体后端协议。
+- LSP 连接与后台进度可以被用户观察。
+- LSP 不可用且能够检测语言时，Tree-sitter 通过同一底栏报告初始化、就绪或失败。
+- 全局后端状态与单次 workspace symbol 查询状态保持独立。
+
+## 当前实现与差距
+
+LSP progress、统一底部状态栏和 Tree-sitter fallback 状态均已交付。Tree-sitter 会初始化对应 grammar 与 tags query；它当前只表示语法分析准备完成，workspace symbol 搜索仍明确依赖 LSP。
