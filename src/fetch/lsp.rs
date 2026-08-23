@@ -1,7 +1,9 @@
 //! Minimal stdio LSP client used by the fetch layer.
 //!
 //! The transport is implemented locally because `tower-lsp` supplies protocol
-//! types and server infrastructure, but ctree needs to act as an LSP client.
+//! types and server infrastructure, but cgraph needs to act as an LSP client.
+
+mod symbol_names;
 
 use std::{
     collections::HashMap,
@@ -9,6 +11,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 
@@ -18,25 +21,27 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::{Child, Command},
-    sync::{mpsc, oneshot},
+    sync::{Mutex, OnceCell, mpsc, oneshot},
     task::JoinHandle,
     time::timeout,
 };
 use tower_lsp::lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, ClientCapabilities, ClientInfo, InitializeParams, InitializeResult,
-    Location, NumberOrString, OneOf, PartialResultParams, Position, ProgressParams,
-    ProgressParamsValue, Range, ServerInfo, SymbolKind, TextDocumentClientCapabilities,
+    CallHierarchyPrepareParams, ClientCapabilities, ClientInfo, DocumentSymbol,
+    DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
+    GeneralClientCapabilities, InitializeParams, InitializeResult, Location, NumberOrString, OneOf,
+    PartialResultParams, Position, PositionEncodingKind, ProgressParams, ProgressParamsValue,
+    Range, ServerInfo, SymbolInformation, SymbolKind, TextDocumentClientCapabilities,
     TextDocumentIdentifier, TextDocumentPositionParams, TypeHierarchyClientCapabilities,
     TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
     TypeHierarchySupertypesParams, Url, WindowClientCapabilities, WorkDoneProgress,
     WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
     WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
     request::{
-        CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare, Initialize,
-        Request, Shutdown, TypeHierarchyPrepare, TypeHierarchySubtypes, TypeHierarchySupertypes,
-        WorkspaceSymbolRequest,
+        CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
+        DocumentSymbolRequest, Initialize, Request, Shutdown, TypeHierarchyPrepare,
+        TypeHierarchySubtypes, TypeHierarchySupertypes, WorkspaceSymbolRequest,
     },
 };
 
@@ -44,6 +49,9 @@ use crate::{
     fetch::{FetchSource, HierarchyQuery, HierarchyResponse},
     state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
 };
+use symbol_names::SymbolNameAdapter;
+
+pub use crate::fetch::WorkspaceSymbolMatch;
 
 // A corrupt Content-Length must not turn into an attacker-controlled allocation.
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
@@ -88,21 +96,6 @@ impl LspConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkspaceSymbolMatch {
-    pub name: String,
-    pub kind: SymbolKind,
-    pub container_name: Option<String>,
-    pub uri: Url,
-    pub range: Option<Range>,
-}
-
-impl WorkspaceSymbolMatch {
-    pub fn display_name(&self) -> String {
-        qualified_callable_name(&self.name, self.kind, self.container_name.as_deref())
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 /// A provider-level status event, kept separate from individual request results.
 ///
 /// Language servers may run several work-done tasks concurrently. The JSON-RPC
@@ -140,6 +133,7 @@ struct LspProgressTracker {
 pub struct WorkspaceSymbolClient {
     client: JsonRpcClient,
     workspace_root: PathBuf,
+    symbol_names: SymbolNameAdapter,
 }
 
 impl fmt::Debug for WorkspaceSymbolClient {
@@ -162,7 +156,9 @@ impl WorkspaceSymbolClient {
             .await
             .with_context(|| format!("workspace symbol query failed for {query:?}"))?;
 
-        let symbols = response.map(normalize_symbols).unwrap_or_default();
+        let symbols = response
+            .map(|response| normalize_symbols(response, self.symbol_names))
+            .unwrap_or_default();
         Ok(deduplicate_symbols(symbols.into_iter().filter(|symbol| {
             symbol_belongs_to_workspace(symbol, &self.workspace_root)
         })))
@@ -173,7 +169,11 @@ impl WorkspaceSymbolClient {
 pub struct HierarchyClient {
     client: JsonRpcClient,
     workspace_root: PathBuf,
+    symbol_names: SymbolNameAdapter,
+    document_symbols: DocumentSymbolCache,
 }
+
+type DocumentSymbolCache = Arc<Mutex<HashMap<Url, Arc<OnceCell<Vec<DocumentSymbolOwner>>>>>>;
 
 impl fmt::Debug for HierarchyClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -222,13 +222,14 @@ impl HierarchyClient {
         let candidates = WorkspaceSymbolClient {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
+            symbol_names: self.symbol_names,
         }
         .query(lookup_name)
         .await?
         .into_iter()
         .filter(|candidate| {
             candidate.range.is_some()
-                && candidate.name == lookup_name
+                && candidate.name.rsplit("::").next() == Some(lookup_name)
                 && symbol_kind_matches_hierarchy(symbol.kind, candidate.kind)
         })
         .collect::<Vec<_>>();
@@ -285,11 +286,14 @@ impl HierarchyClient {
                     )
                     .await
                     .context("failed to query incoming calls")?;
-                Ok(calls
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|call| call_item_identity(call.from))
-                    .collect())
+                self.call_item_identities(
+                    calls
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|call| call.from)
+                        .collect(),
+                )
+                .await
             }
             HierarchyDirection::Outgoing => {
                 let calls: Option<Vec<CallHierarchyOutgoingCall>> = self
@@ -304,13 +308,76 @@ impl HierarchyClient {
                     )
                     .await
                     .context("failed to query outgoing calls")?;
-                Ok(calls
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|call| call_item_identity(call.to))
-                    .collect())
+                self.call_item_identities(
+                    calls
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|call| call.to)
+                        .collect(),
+                )
+                .await
             }
         }
+    }
+
+    async fn call_item_identities(
+        &self,
+        items: Vec<CallHierarchyItem>,
+    ) -> Result<Vec<SymbolIdentity>> {
+        let mut identities = Vec::with_capacity(items.len());
+        for item in items {
+            let container = if self.symbol_names.uses_document_symbols() {
+                self.document_symbol_container(&item).await
+            } else {
+                None
+            };
+            identities.push(call_item_identity(
+                item,
+                self.symbol_names,
+                container.as_deref(),
+            ));
+        }
+        Ok(identities)
+    }
+
+    async fn document_symbol_container(&self, item: &CallHierarchyItem) -> Option<String> {
+        if !matches!(
+            item.kind,
+            SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::CONSTRUCTOR
+        ) {
+            return None;
+        }
+
+        // rust-analyzer's call hierarchy exposes only a signature in `detail`.
+        // The map lock only creates a per-URI cell; the LSP round trip happens
+        // outside it, so different documents can resolve concurrently.
+        let document_symbols = {
+            let mut cache = self.document_symbols.lock().await;
+            Arc::clone(
+                cache
+                    .entry(item.uri.clone())
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        let symbols = document_symbols
+            .get_or_init(|| async {
+                let response: Option<DocumentSymbolResponse> = self
+                    .client
+                    .request(
+                        DocumentSymbolRequest::METHOD,
+                        DocumentSymbolParams {
+                            text_document: TextDocumentIdentifier::new(item.uri.clone()),
+                            work_done_progress_params: WorkDoneProgressParams::default(),
+                            partial_result_params: PartialResultParams::default(),
+                        },
+                    )
+                    .await
+                    .ok()
+                    .flatten();
+                response.map(normalize_document_symbols).unwrap_or_default()
+            })
+            .await;
+        find_document_symbol_container(symbols, item).map(str::to_owned)
     }
 
     async fn type_children(
@@ -373,6 +440,8 @@ pub struct LspProvider {
     connection_task: JoinHandle<Result<()>>,
     workspace_root: PathBuf,
     server_info: Option<ServerInfo>,
+    symbol_names: SymbolNameAdapter,
+    document_symbols: DocumentSymbolCache,
     status_receiver: Option<mpsc::UnboundedReceiver<LspStatusUpdate>>,
 }
 
@@ -439,27 +508,7 @@ impl LspProvider {
             workspace_name.clone(),
         );
 
-        let capabilities = ClientCapabilities {
-            text_document: Some(TextDocumentClientCapabilities {
-                call_hierarchy: Some(CallHierarchyClientCapabilities::default()),
-                type_hierarchy: Some(TypeHierarchyClientCapabilities::default()),
-                ..TextDocumentClientCapabilities::default()
-            }),
-            workspace: Some(WorkspaceClientCapabilities {
-                symbol: Some(WorkspaceSymbolClientCapabilities::default()),
-                workspace_folders: Some(true),
-                configuration: Some(true),
-                ..WorkspaceClientCapabilities::default()
-            }),
-            window: Some(WindowClientCapabilities {
-                work_done_progress: Some(true),
-                ..WindowClientCapabilities::default()
-            }),
-            experimental: Some(json!({
-                "serverStatusNotification": true,
-            })),
-            ..ClientCapabilities::default()
-        };
+        let capabilities = client_capabilities();
         let initialization_options = workspace_symbol_initialization_options(
             &config.program,
             config.initialization_options.clone(),
@@ -484,6 +533,9 @@ impl LspProvider {
             .request(Initialize::METHOD, initialize_params)
             .await
             .context("language server initialization failed")?;
+        if !uses_utf16_positions(initialize_result.capabilities.position_encoding.as_ref()) {
+            bail!("language server selected a position encoding other than UTF-16");
+        }
         if !workspace_symbol_supported(&initialize_result) {
             bail!("language server does not support workspace/symbol");
         }
@@ -493,12 +545,21 @@ impl LspProvider {
             .await
             .context("failed to notify language server that initialization completed")?;
 
+        let symbol_names = SymbolNameAdapter::detect(
+            &config.program,
+            initialize_result
+                .server_info
+                .as_ref()
+                .map(|info| info.name.as_str()),
+        );
         Ok(Self {
             child,
             client,
             connection_task,
             workspace_root,
             server_info: initialize_result.server_info,
+            symbol_names,
+            document_symbols: Arc::new(Mutex::new(HashMap::new())),
             status_receiver: Some(status_receiver),
         })
     }
@@ -521,6 +582,7 @@ impl LspProvider {
         WorkspaceSymbolClient {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
+            symbol_names: self.symbol_names,
         }
     }
 
@@ -528,6 +590,8 @@ impl LspProvider {
         HierarchyClient {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
+            symbol_names: self.symbol_names,
+            document_symbols: Arc::clone(&self.document_symbols),
         }
     }
 
@@ -559,6 +623,38 @@ impl LspProvider {
 
         shutdown_result
     }
+}
+
+fn client_capabilities() -> ClientCapabilities {
+    ClientCapabilities {
+        text_document: Some(TextDocumentClientCapabilities {
+            call_hierarchy: Some(CallHierarchyClientCapabilities::default()),
+            document_symbol: Some(DocumentSymbolClientCapabilities::default()),
+            type_hierarchy: Some(TypeHierarchyClientCapabilities::default()),
+            ..TextDocumentClientCapabilities::default()
+        }),
+        workspace: Some(WorkspaceClientCapabilities {
+            symbol: Some(WorkspaceSymbolClientCapabilities::default()),
+            workspace_folders: Some(true),
+            configuration: Some(true),
+            ..WorkspaceClientCapabilities::default()
+        }),
+        window: Some(WindowClientCapabilities {
+            work_done_progress: Some(true),
+            ..WindowClientCapabilities::default()
+        }),
+        general: Some(GeneralClientCapabilities {
+            position_encodings: Some(vec![PositionEncodingKind::UTF16]),
+            ..GeneralClientCapabilities::default()
+        }),
+        experimental: Some(json!({
+            "serverStatusNotification": true,
+        })),
+    }
+}
+
+fn uses_utf16_positions(position_encoding: Option<&PositionEncodingKind>) -> bool {
+    position_encoding.is_none_or(|encoding| encoding == &PositionEncodingKind::UTF16)
 }
 
 #[derive(Clone)]
@@ -1050,7 +1146,7 @@ where
             "id": id,
             "error": {
                 "code": -32601,
-                "message": format!("ctree does not implement {method}"),
+                "message": format!("cgraph does not implement {method}"),
             },
         }),
     };
@@ -1192,8 +1288,17 @@ fn symbol_kind_matches_hierarchy(kind: HierarchyKind, symbol_kind: SymbolKind) -
     }
 }
 
-fn call_item_identity(item: CallHierarchyItem) -> SymbolIdentity {
-    let symbol = qualified_callable_name(&item.name, item.kind, item.detail.as_deref());
+fn call_item_identity(
+    item: CallHierarchyItem,
+    symbol_names: SymbolNameAdapter,
+    document_container: Option<&str>,
+) -> SymbolIdentity {
+    let symbol = symbol_names.call_hierarchy_item(
+        &item.name,
+        item.kind,
+        item.detail.as_deref(),
+        document_container,
+    );
     SymbolIdentity {
         symbol,
         kind: HierarchyKind::Call,
@@ -1205,28 +1310,86 @@ fn call_item_identity(item: CallHierarchyItem) -> SymbolIdentity {
     }
 }
 
-fn qualified_callable_name(
-    name: &str,
+#[derive(Clone, Debug)]
+struct DocumentSymbolOwner {
+    name: String,
     kind: SymbolKind,
-    container_or_detail: Option<&str>,
-) -> String {
-    if !matches!(kind, SymbolKind::METHOD | SymbolKind::CONSTRUCTOR) || name.contains("::") {
-        return name.to_owned();
+    range: Range,
+    container_name: Option<String>,
+}
+
+fn normalize_document_symbols(response: DocumentSymbolResponse) -> Vec<DocumentSymbolOwner> {
+    match response {
+        DocumentSymbolResponse::Flat(symbols) => {
+            symbols.into_iter().map(document_symbol_owner).collect()
+        }
+        DocumentSymbolResponse::Nested(symbols) => {
+            let mut normalized = Vec::new();
+            normalize_nested_document_symbols(&symbols, None, &mut normalized);
+            normalized
+        }
     }
-    let Some(container) = container_or_detail
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return name.to_owned();
-    };
-    let container = container.strip_prefix("impl ").unwrap_or(container).trim();
-    if container.contains(['/', '\\', '(', ')', '\n']) || container.split_whitespace().count() > 1 {
-        return name.to_owned();
+}
+
+#[allow(deprecated)]
+fn document_symbol_owner(symbol: SymbolInformation) -> DocumentSymbolOwner {
+    DocumentSymbolOwner {
+        name: symbol.name,
+        kind: symbol.kind,
+        range: symbol.location.range,
+        container_name: symbol.container_name,
     }
-    if container.ends_with(&format!("::{name}")) || container.ends_with(&format!(".{name}")) {
-        return container.to_owned();
+}
+
+fn normalize_nested_document_symbols(
+    symbols: &[DocumentSymbol],
+    container_name: Option<&str>,
+    normalized: &mut Vec<DocumentSymbolOwner>,
+) {
+    for symbol in symbols {
+        normalized.push(DocumentSymbolOwner {
+            name: symbol.name.clone(),
+            kind: symbol.kind,
+            range: symbol.range,
+            container_name: container_name.map(str::to_owned),
+        });
+        if let Some(children) = symbol.children.as_deref() {
+            normalize_nested_document_symbols(children, Some(&symbol.name), normalized);
+        }
     }
-    format!("{container}::{name}")
+}
+
+fn find_document_symbol_container<'a>(
+    symbols: &'a [DocumentSymbolOwner],
+    item: &CallHierarchyItem,
+) -> Option<&'a str> {
+    symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.name == item.name
+                && matches!(
+                    symbol.kind,
+                    SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::CONSTRUCTOR
+                )
+                && range_contains_position(symbol.range, item.selection_range.start)
+        })
+        .min_by_key(|symbol| range_span_key(symbol.range))
+        .and_then(|symbol| symbol.container_name.as_deref())
+}
+
+fn range_contains_position(range: Range, position: Position) -> bool {
+    position_after_or_equal(position, range.start) && position_after_or_equal(range.end, position)
+}
+
+fn position_after_or_equal(left: Position, right: Position) -> bool {
+    (left.line, left.character) >= (right.line, right.character)
+}
+
+fn range_span_key(range: Range) -> (u32, u32) {
+    (
+        range.end.line.saturating_sub(range.start.line),
+        range.end.character.saturating_sub(range.start.character),
+    )
 }
 
 fn type_item_identity(item: TypeHierarchyItem) -> SymbolIdentity {
@@ -1253,16 +1416,26 @@ fn deduplicate_identities(
     unique
 }
 
-fn normalize_symbols(response: WorkspaceSymbolResponse) -> Vec<WorkspaceSymbolMatch> {
+fn normalize_symbols(
+    response: WorkspaceSymbolResponse,
+    symbol_names: SymbolNameAdapter,
+) -> Vec<WorkspaceSymbolMatch> {
     match response {
         WorkspaceSymbolResponse::Flat(symbols) => symbols
             .into_iter()
-            .map(|symbol| WorkspaceSymbolMatch {
-                name: symbol.name,
-                kind: symbol.kind,
-                container_name: symbol.container_name,
-                uri: symbol.location.uri,
-                range: Some(symbol.location.range),
+            .map(|symbol| {
+                let name = symbol_names.workspace_symbol(
+                    &symbol.name,
+                    symbol.kind,
+                    symbol.container_name.as_deref(),
+                );
+                WorkspaceSymbolMatch {
+                    name,
+                    kind: symbol.kind,
+                    container_name: symbol.container_name,
+                    uri: symbol.location.uri,
+                    range: Some(symbol.location.range),
+                }
             })
             .collect(),
         WorkspaceSymbolResponse::Nested(symbols) => symbols
@@ -1272,8 +1445,13 @@ fn normalize_symbols(response: WorkspaceSymbolResponse) -> Vec<WorkspaceSymbolMa
                     OneOf::Left(Location { uri, range }) => (uri, Some(range)),
                     OneOf::Right(location) => (location.uri, None),
                 };
+                let name = symbol_names.workspace_symbol(
+                    &symbol.name,
+                    symbol.kind,
+                    symbol.container_name.as_deref(),
+                );
                 WorkspaceSymbolMatch {
-                    name: symbol.name,
+                    name,
                     kind: symbol.kind,
                     container_name: symbol.container_name,
                     uri,
@@ -1353,13 +1531,18 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::io::{BufReader, duplex, split};
     use tokio::time::timeout;
-    use tower_lsp::lsp_types::{SymbolKind, Url, WorkspaceSymbolParams, WorkspaceSymbolResponse};
+    use tower_lsp::lsp_types::{
+        SymbolKind, Url, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+        request::{DocumentSymbolRequest, Request},
+    };
 
+    use super::symbol_names::SymbolNameAdapter;
     use super::{
         HierarchyClient, LspProgressTracker, LspStatusUpdate, WorkspaceSymbolMatch,
-        deduplicate_symbols, handle_server_notification, normalize_symbols, read_message,
-        requested_configuration, response_id, spawn_json_rpc, symbol_belongs_to_workspace,
-        workspace_symbol_initialization_options, write_message,
+        client_capabilities, deduplicate_symbols, handle_server_notification, normalize_symbols,
+        read_message, requested_configuration, response_id, spawn_json_rpc,
+        symbol_belongs_to_workspace, uses_utf16_positions, workspace_symbol_initialization_options,
+        write_message,
     };
     use crate::{
         fetch::{FetchSource, HierarchyQuery},
@@ -1427,6 +1610,22 @@ mod tests {
     }
 
     #[test]
+    fn negotiates_only_utf16_source_positions() {
+        let capabilities = serde_json::to_value(client_capabilities()).unwrap();
+        assert_eq!(
+            capabilities["general"]["positionEncodings"],
+            json!(["utf-16"])
+        );
+        assert!(uses_utf16_positions(None));
+        assert!(uses_utf16_positions(Some(
+            &tower_lsp::lsp_types::PositionEncodingKind::UTF16
+        )));
+        assert!(!uses_utf16_positions(Some(
+            &tower_lsp::lsp_types::PositionEncodingKind::UTF8
+        )));
+    }
+
+    #[test]
     fn deduplicates_identical_workspace_symbols() {
         let duplicate = symbol("file:///workspace/src/main.rs");
         assert_eq!(
@@ -1450,6 +1649,8 @@ mod tests {
         let hierarchy_client = HierarchyClient {
             client: rpc_client.clone(),
             workspace_root: PathBuf::from("/workspace"),
+            symbol_names: SymbolNameAdapter::RustAnalyzer,
+            document_symbols: Default::default(),
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -1492,9 +1693,37 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": response_id(&outgoing).unwrap(),
                 "result": [
-                    { "to": method_item("child", "Worker", 8), "fromRanges": [] },
-                    { "to": method_item("child", "Worker", 8), "fromRanges": [] }
+                    { "to": rust_method_item("child", 8), "fromRanges": [] },
+                    { "to": rust_method_item("child", 8), "fromRanges": [] }
                 ]
+            }),
+        )
+        .await
+        .unwrap();
+
+        let document_symbols = read_message(&mut server_reader).await.unwrap();
+        assert_eq!(document_symbols["method"], DocumentSymbolRequest::METHOD);
+        assert_eq!(
+            document_symbols["params"]["textDocument"]["uri"],
+            "file:///workspace/src/main.rs"
+        );
+        write_message(
+            &mut server_writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": response_id(&document_symbols).unwrap(),
+                "result": [{
+                    "name": "child",
+                    "kind": 12,
+                    "location": {
+                        "uri": "file:///workspace/src/main.rs",
+                        "range": {
+                            "start": { "line": 8, "character": 0 },
+                            "end": { "line": 10, "character": 1 }
+                        }
+                    },
+                    "containerName": "impl Worker"
+                }]
             }),
         )
         .await
@@ -1530,6 +1759,8 @@ mod tests {
         let hierarchy_client = HierarchyClient {
             client: rpc_client.clone(),
             workspace_root: PathBuf::from("/workspace"),
+            symbol_names: SymbolNameAdapter::Standard,
+            document_symbols: Default::default(),
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -1695,7 +1926,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            normalize_symbols(response.unwrap())
+            normalize_symbols(response.unwrap(), SymbolNameAdapter::Standard)
         });
 
         let request = read_message(&mut server_reader).await.unwrap();
@@ -1837,10 +2068,9 @@ mod tests {
         })
     }
 
-    fn method_item(name: &str, container: &str, line: u32) -> Value {
+    fn rust_method_item(name: &str, line: u32) -> Value {
         let mut item = call_item(name, line);
-        item["kind"] = json!(6);
-        item["detail"] = json!(container);
+        item["detail"] = json!(format!("pub fn {name}(&self)"));
         item
     }
 

@@ -1,9 +1,20 @@
 [package]
-name = "ctree"
+name = "call-graph-cli"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Interactive call and type hierarchy TUI"
+authors = ["Yinzuo Jiang"]
+license = "MIT"
+repository = "https://github.com/jiangyinzuo/cgraph"
+
+[lib]
+name = "cgraph"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cgraph"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"

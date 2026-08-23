@@ -3,13 +3,20 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use petgraph::{algo::kosaraju_scc, graph::DiGraph};
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-    widgets::Widget,
+    layout::{Alignment, Rect},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::state::{NodeId, Viewport, graph::RelationGraph};
+use crate::state::{
+    LoadState, NodeId, Viewport,
+    graph::{GraphBranch, GraphNode, RelationGraph},
+};
+
+mod connections;
+
+pub(super) use connections::{CanvasConnections, CanvasEdge};
 
 const ROOT_NODE_WIDTH: u16 = 28;
 const ROOT_NODE_HEIGHT: u16 = 3;
@@ -20,9 +27,22 @@ const NODE_CHROME_WIDTH: u16 = 8;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CanvasNodePlacement {
     pub(super) node_id: NodeId,
+    pub(super) slot: ProjectedRect,
+    pub(super) visible_slot: Rect,
     pub(super) area: Rect,
     pub(super) incoming_button: Rect,
     pub(super) outgoing_button: Rect,
+    pub(super) local_area: Rect,
+    pub(super) local_incoming_button: Rect,
+    pub(super) local_outgoing_button: Rect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ProjectedRect {
+    pub(super) x: i64,
+    pub(super) y: i64,
+    pub(super) width: u16,
+    pub(super) height: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,6 +57,12 @@ pub(super) struct WorldRect {
 pub(super) struct WorldNodePlacement {
     pub(super) node_id: NodeId,
     pub(super) slot: WorldRect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProjectedNodePlacement {
+    node_id: NodeId,
+    slot: ProjectedRect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,52 +91,94 @@ pub(super) struct WorldLayoutSnapshot {
     pub(super) edges: Vec<LayoutEdge>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CanvasLineCell {
-    pub(super) x: u16,
-    pub(super) y: u16,
-    pub(super) symbol: char,
-    pub(super) visual_kind: EdgeVisualKind,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct CanvasEdge {
-    pub(super) source_id: NodeId,
-    pub(super) target_id: NodeId,
-    pub(super) visual_kind: EdgeVisualKind,
-    pub(super) cells: Vec<CanvasLineCell>,
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct CanvasLayoutSnapshot {
     pub(super) nodes: Vec<CanvasNodePlacement>,
     pub(super) edges: Vec<CanvasEdge>,
 }
 
-pub(super) struct CanvasConnections<'a> {
-    pub(super) edges: &'a [CanvasEdge],
+pub(super) struct CanvasNodeWidget<'a> {
+    pub(super) node: &'a GraphNode,
+    pub(super) placement: CanvasNodePlacement,
+    pub(super) selected: bool,
 }
 
-impl Widget for CanvasConnections<'_> {
+impl Widget for CanvasNodeWidget<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
-        for cell in self.edges.iter().flat_map(|edge| &edge.cells) {
-            if !area.contains((cell.x, cell.y).into()) {
-                continue;
+        let placement = self.placement;
+        let mut local = Buffer::empty(Rect::new(0, 0, placement.slot.width, placement.slot.height));
+        let border_style = if self.selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        let content_style = if self.selected {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Paragraph::new(self.node.symbol.as_str())
+            .alignment(Alignment::Center)
+            .style(content_style)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            )
+            .render(placement.local_area, &mut local);
+        branch_button(&self.node.incoming, Color::Blue)
+            .render(placement.local_incoming_button, &mut local);
+        branch_button(&self.node.outgoing, Color::Blue)
+            .render(placement.local_outgoing_button, &mut local);
+
+        for y in placement.visible_slot.y..placement.visible_slot.bottom() {
+            for x in placement.visible_slot.x..placement.visible_slot.right() {
+                if !area.contains((x, y).into()) {
+                    continue;
+                }
+                let local_x = i64::from(x).saturating_sub(placement.slot.x);
+                let local_y = i64::from(y).saturating_sub(placement.slot.y);
+                let Ok(local_x) = u16::try_from(local_x) else {
+                    continue;
+                };
+                let Ok(local_y) = u16::try_from(local_y) else {
+                    continue;
+                };
+                let local_position = (local_x, local_y).into();
+                if !placement.local_area.contains(local_position)
+                    && !placement.local_incoming_button.contains(local_position)
+                    && !placement.local_outgoing_button.contains(local_position)
+                {
+                    continue;
+                }
+                let Some(source) = local.cell((local_x, local_y)) else {
+                    continue;
+                };
+                let Some(target) = buffer.cell_mut((x, y)) else {
+                    continue;
+                };
+                *target = source.clone();
             }
-            let Some(target) = buffer.cell_mut((cell.x, cell.y)) else {
-                continue;
-            };
-            let symbol = merge_connection_symbol(target.symbol(), cell.symbol);
-            let color = if cell.visual_kind.is_special() {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            };
-            target
-                .set_char(symbol)
-                .set_style(Style::default().fg(color));
         }
     }
+}
+
+fn branch_button(branch: &GraphBranch, color: Color) -> Paragraph<'static> {
+    let (label, style) = match branch.load_state {
+        LoadState::NotLoaded if branch.neighbors.is_empty() => {
+            ("[+]", Style::default().fg(Color::Yellow))
+        }
+        LoadState::Loading => ("[~]", Style::default().fg(Color::Yellow)),
+        LoadState::Failed => ("[!]", Style::default().fg(Color::Red)),
+        LoadState::Loaded if branch.neighbors.is_empty() => {
+            (" · ", Style::default().fg(Color::DarkGray))
+        }
+        _ if branch.expanded => ("[-]", Style::default().fg(color)),
+        _ => ("[+]", Style::default().fg(color)),
+    };
+    Paragraph::new(label).style(style)
 }
 
 pub(super) fn canvas_layout(
@@ -120,18 +188,30 @@ pub(super) fn canvas_layout(
     viewport: Viewport,
 ) -> CanvasLayoutSnapshot {
     let world = world_canvas_layout(graph, selected);
-    let nodes = world
+    let projected = world
         .nodes
         .iter()
+        .map(|placement| ProjectedNodePlacement {
+            node_id: placement.node_id,
+            slot: project_world_slot(area, placement.slot, viewport),
+        })
+        .collect::<Vec<_>>();
+    let nodes = projected
+        .iter()
         .filter_map(|placement| {
-            project_world_slot(area, placement.slot, viewport)
-                .map(|slot| node_placement(placement.node_id, slot))
+            let visible_slot = intersect_projected_rect(area, placement.slot)?;
+            Some(node_placement(
+                placement.node_id,
+                placement.slot,
+                visible_slot,
+                area,
+            ))
         })
         .collect::<Vec<_>>();
     let mut edges = world
         .edges
         .iter()
-        .filter_map(|edge| route_edge(*edge, &nodes))
+        .filter_map(|edge| connections::route_edge(*edge, &projected, area))
         .collect::<Vec<_>>();
     edges.sort_by_key(|edge| edge.visual_kind.is_special());
     CanvasLayoutSnapshot { nodes, edges }
@@ -171,17 +251,10 @@ pub(super) fn world_canvas_layout(
         .and_then(|node_id| graph.resolve_id(node_id))
         .filter(|node_id| visible.nodes.contains(node_id))
         .unwrap_or(visible.nodes[0]);
-    let selected_rank = component_ranks[&component_by_node[&selected]];
-
     let mut nodes_by_rank = BTreeMap::<i32, Vec<NodeId>>::new();
     for node_id in &visible.nodes {
-        let rank = component_ranks[&component_by_node[node_id]] - selected_rank;
+        let rank = component_ranks[&component_by_node[node_id]];
         nodes_by_rank.entry(rank).or_default().push(*node_id);
-    }
-    if let Some(nodes) = nodes_by_rank.get_mut(&0)
-        && let Some(index) = nodes.iter().position(|node_id| *node_id == selected)
-    {
-        nodes.swap(0, index);
     }
 
     let column_widths = nodes_by_rank
@@ -217,6 +290,21 @@ pub(super) fn world_canvas_layout(
                 },
             });
         }
+    }
+    let selected_slot = placements
+        .iter()
+        .find(|placement| placement.node_id == selected)
+        .expect("the selected visible node has a placement")
+        .slot;
+    let selected_center_x = selected_slot
+        .x
+        .saturating_add(i32::from(selected_slot.width) / 2);
+    let selected_center_y = selected_slot
+        .y
+        .saturating_add(i32::from(selected_slot.height) / 2);
+    for placement in &mut placements {
+        placement.slot.x = placement.slot.x.saturating_sub(selected_center_x);
+        placement.slot.y = placement.slot.y.saturating_sub(selected_center_y);
     }
 
     let edges = visible
@@ -335,29 +423,49 @@ fn alternating_row(index: usize) -> i32 {
     }
 }
 
-fn project_world_slot(area: Rect, slot: WorldRect, viewport: Viewport) -> Option<Rect> {
-    if slot.width > area.width || slot.height > area.height {
-        return None;
-    }
+fn project_world_slot(area: Rect, slot: WorldRect, viewport: Viewport) -> ProjectedRect {
     let anchor_x = area.x + area.width / 2;
     let anchor_y = area.y + area.height / 2;
     let screen_x = i64::from(anchor_x) + i64::from(slot.x) + i64::from(viewport.offset_x);
     let screen_y = i64::from(anchor_y) + i64::from(slot.y) + i64::from(viewport.offset_y);
-    let right = screen_x + i64::from(slot.width);
-    let bottom = screen_y + i64::from(slot.height);
-    if screen_x < i64::from(area.x)
-        || screen_y < i64::from(area.y)
-        || right > i64::from(area.right())
-        || bottom > i64::from(area.bottom())
-    {
+    ProjectedRect {
+        x: screen_x,
+        y: screen_y,
+        width: slot.width,
+        height: slot.height,
+    }
+}
+
+fn intersect_projected_rect(area: Rect, projected: ProjectedRect) -> Option<Rect> {
+    let left = projected.x.max(i64::from(area.x));
+    let top = projected.y.max(i64::from(area.y));
+    let right = projected
+        .x
+        .saturating_add(i64::from(projected.width))
+        .min(i64::from(area.right()));
+    let bottom = projected
+        .y
+        .saturating_add(i64::from(projected.height))
+        .min(i64::from(area.bottom()));
+    if left >= right || top >= bottom {
         return None;
     }
     Some(Rect::new(
-        u16::try_from(screen_x).ok()?,
-        u16::try_from(screen_y).ok()?,
-        slot.width,
-        slot.height,
+        u16::try_from(left).ok()?,
+        u16::try_from(top).ok()?,
+        u16::try_from(right - left).ok()?,
+        u16::try_from(bottom - top).ok()?,
     ))
+}
+
+fn intersect_local_rect(area: Rect, slot: ProjectedRect, local: Rect) -> Rect {
+    let projected = ProjectedRect {
+        x: slot.x.saturating_add(i64::from(local.x)),
+        y: slot.y.saturating_add(i64::from(local.y)),
+        width: local.width,
+        height: local.height,
+    };
+    intersect_projected_rect(area, projected).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -383,172 +491,31 @@ pub(super) fn world_rects_overlap(left: WorldRect, right: WorldRect) -> bool {
         && right.y < left.y.saturating_add(i32::from(left.height))
 }
 
-fn route_edge(edge: LayoutEdge, placements: &[CanvasNodePlacement]) -> Option<CanvasEdge> {
-    let source = placements
-        .iter()
-        .find(|placement| placement.node_id == edge.source_id)?;
-    let target = placements
-        .iter()
-        .find(|placement| placement.node_id == edge.target_id)?;
-    let cells = match edge.visual_kind {
-        EdgeVisualKind::Forward => orthogonal_connection(
-            (
-                source.outgoing_button.right().saturating_sub(1),
-                source.outgoing_button.y,
-            ),
-            (target.incoming_button.x, target.incoming_button.y),
-            edge.visual_kind,
-        ),
-        EdgeVisualKind::BackOrCycle => back_connection(source, target),
-        EdgeVisualKind::SelfLoop => self_loop_connection(source),
-    };
-    Some(CanvasEdge {
-        source_id: edge.source_id,
-        target_id: edge.target_id,
-        visual_kind: edge.visual_kind,
-        cells,
-    })
-}
-
-fn back_connection(
-    source: &CanvasNodePlacement,
-    target: &CanvasNodePlacement,
-) -> Vec<CanvasLineCell> {
-    let from = (source.incoming_button.x, source.incoming_button.y);
-    let to = (
-        target.outgoing_button.right().saturating_sub(1),
-        target.outgoing_button.y,
-    );
-    let channel_x = from.0.min(to.0).saturating_sub(2);
-    let mut cells = polyline_connection(
-        &[from, (channel_x, from.1), (channel_x, to.1), to],
-        EdgeVisualKind::BackOrCycle,
-    );
-    push_connection_cell(
-        &mut cells,
-        target.outgoing_button.right(),
-        target.outgoing_button.y,
-        '◀',
-        EdgeVisualKind::BackOrCycle,
-    );
-    cells
-}
-
-fn self_loop_connection(source: &CanvasNodePlacement) -> Vec<CanvasLineCell> {
-    let from = (
-        source.outgoing_button.right().saturating_sub(1),
-        source.outgoing_button.y,
-    );
-    let channel_x = source.outgoing_button.right().saturating_add(2);
-    let lower_y = source.area.bottom();
-    let mut cells = polyline_connection(
-        &[
-            from,
-            (channel_x, from.1),
-            (channel_x, lower_y),
-            (source.outgoing_button.right(), lower_y),
-        ],
-        EdgeVisualKind::SelfLoop,
-    );
-    push_connection_cell(
-        &mut cells,
-        source.outgoing_button.right(),
-        source.outgoing_button.y.saturating_sub(1),
-        '↺',
-        EdgeVisualKind::SelfLoop,
-    );
-    cells
-}
-
-fn orthogonal_connection(
-    from: (u16, u16),
-    to: (u16, u16),
-    visual_kind: EdgeVisualKind,
-) -> Vec<CanvasLineCell> {
-    let bend_x = from.0.midpoint(to.0);
-    polyline_connection(&[from, (bend_x, from.1), (bend_x, to.1), to], visual_kind)
-}
-
-fn polyline_connection(points: &[(u16, u16)], visual_kind: EdgeVisualKind) -> Vec<CanvasLineCell> {
-    let mut cells = Vec::new();
-    for segment in points.windows(2) {
-        let from = segment[0];
-        let to = segment[1];
-        if from.1 == to.1 {
-            let symbol = if visual_kind.is_special() {
-                '═'
-            } else {
-                '─'
-            };
-            for x in from.0.min(to.0)..=from.0.max(to.0) {
-                push_connection_cell(&mut cells, x, from.1, symbol, visual_kind);
-            }
-        } else {
-            let symbol = if visual_kind.is_special() {
-                '║'
-            } else {
-                '│'
-            };
-            for y in from.1.min(to.1)..=from.1.max(to.1) {
-                push_connection_cell(&mut cells, from.0, y, symbol, visual_kind);
-            }
-        }
-    }
-    cells
-}
-
-fn push_connection_cell(
-    cells: &mut Vec<CanvasLineCell>,
-    x: u16,
-    y: u16,
-    symbol: char,
-    visual_kind: EdgeVisualKind,
-) {
-    if let Some(existing) = cells.iter_mut().find(|cell| cell.x == x && cell.y == y) {
-        existing.symbol = merge_connection_symbol(&existing.symbol.to_string(), symbol);
-        if visual_kind.is_special() {
-            existing.visual_kind = visual_kind;
-        }
-    } else {
-        cells.push(CanvasLineCell {
-            x,
-            y,
-            symbol,
-            visual_kind,
-        });
-    }
-}
-
-fn merge_connection_symbol(existing: &str, incoming: char) -> char {
-    match (existing, incoming) {
-        ("", incoming) | (" ", incoming) => incoming,
-        ("─", '─') => '─',
-        ("│", '│') => '│',
-        ("═", '═') => '═',
-        ("║", '║') => '║',
-        ("┼", '─' | '│') => '┼',
-        ("╬", _) | (_, '╬') => '╬',
-        ("═" | "║", '─' | '│' | '═' | '║') => '╬',
-        ("─" | "│", '═' | '║') => '╬',
-        (_, '◀' | '▶' | '▲' | '▼' | '↺') => incoming,
-        ("◀" | "▶" | "▲" | "▼" | "↺", _) => existing.chars().next().unwrap_or(incoming),
-        _ => '┼',
-    }
-}
-
-fn node_placement(node_id: NodeId, slot: Rect) -> CanvasNodePlacement {
+fn node_placement(
+    node_id: NodeId,
+    slot: ProjectedRect,
+    visible_slot: Rect,
+    canvas: Rect,
+) -> CanvasNodePlacement {
     let button_width = 3.min(slot.width / 3);
-    let area = Rect::new(
-        slot.x + button_width,
-        slot.y,
+    let local_area = Rect::new(
+        button_width,
+        0,
         slot.width.saturating_sub(button_width * 2),
         slot.height,
     );
+    let local_incoming_button = Rect::new(0, slot.height / 2, button_width, 1);
+    let local_outgoing_button = Rect::new(local_area.right(), slot.height / 2, button_width, 1);
     CanvasNodePlacement {
         node_id,
-        area,
-        incoming_button: Rect::new(slot.x, slot.y + slot.height / 2, button_width, 1),
-        outgoing_button: Rect::new(area.right(), slot.y + slot.height / 2, button_width, 1),
+        slot,
+        visible_slot,
+        area: intersect_local_rect(canvas, slot, local_area),
+        incoming_button: intersect_local_rect(canvas, slot, local_incoming_button),
+        outgoing_button: intersect_local_rect(canvas, slot, local_outgoing_button),
+        local_area,
+        local_incoming_button,
+        local_outgoing_button,
     }
 }
 

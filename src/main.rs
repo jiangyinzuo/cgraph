@@ -1,26 +1,33 @@
 use std::{ffi::OsString, fs, path::Path};
 
 use anyhow::Result;
-use clap::Parser;
-use ctree::{
+use cgraph::{
     app::{AnalysisPhase, AnalysisStatus, App},
     cli::Cli,
     config::ProjectConfig,
     fetch::{
+        HierarchyClient, WorkspaceSymbolClient,
         lsp::{LspConfig, LspProvider},
         treesitter::{TreeSitterLanguage, TreeSitterProvider},
     },
+    ipc::IpcServer,
     tui,
 };
+use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let workspace = cli.workspace.clone();
+    let ipc_socket = cli.ipc_socket.clone();
     let project_config = ProjectConfig::load(&workspace)?;
     let lsp_config = lsp_config(&cli);
     let mut app = App::from_cli(cli);
     app.set_symbol_filter(project_config.symbol_filter);
+    let mut ipc_server = match ipc_socket {
+        Some(socket_path) => Some(IpcServer::start(socket_path)?),
+        None => None,
+    };
     // LSP is an optional capability. A missing or broken server should degrade
     // the search modal with a visible error, not prevent the canvas from opening.
     let mut lsp = match lsp_config {
@@ -36,7 +43,7 @@ async fn main() -> Result<()> {
                     Some(lsp)
                 }
                 Err(error) => {
-                    app.set_lsp_error(format!("Failed to start LSP: {error:#}"));
+                    app.set_analysis_error(format!("Failed to start LSP: {error:#}"));
                     let mut status = AnalysisStatus::lsp(server_name, AnalysisPhase::Error);
                     status.message = Some(format!("Failed to start: {error:#}"));
                     app.set_analysis_status(status);
@@ -45,21 +52,43 @@ async fn main() -> Result<()> {
             }
         }
         None => {
-            app.set_lsp_error("No language server detected; use --lsp PROGRAM");
+            app.set_analysis_error("No LSP or supported Tree-sitter provider is available");
             app.set_analysis_status(AnalysisStatus::inactive(
                 "No LSP configured; checking Tree-sitter fallback",
             ));
             None
         }
     };
-    let _tree_sitter = if lsp.is_none() {
+    let tree_sitter = if lsp.is_none() {
         start_tree_sitter_fallback(&workspace, &mut app)
     } else {
         None
     };
-    let symbol_client = lsp.as_ref().map(LspProvider::workspace_symbol_client);
-    let hierarchy_client = lsp.as_ref().map(LspProvider::hierarchy_client);
+    let symbol_client = lsp
+        .as_ref()
+        .map(LspProvider::workspace_symbol_client)
+        .map(WorkspaceSymbolClient::from)
+        .or_else(|| {
+            tree_sitter
+                .as_ref()
+                .map(TreeSitterProvider::workspace_symbol_client)
+                .map(WorkspaceSymbolClient::from)
+        });
+    let hierarchy_client = lsp
+        .as_ref()
+        .map(LspProvider::hierarchy_client)
+        .map(HierarchyClient::from)
+        .or_else(|| {
+            tree_sitter
+                .as_ref()
+                .map(TreeSitterProvider::hierarchy_client)
+                .map(HierarchyClient::from)
+        });
     let lsp_status_receiver = lsp.as_mut().and_then(LspProvider::take_status_receiver);
+    let ipc_event_sender = ipc_server.as_ref().map(IpcServer::event_sender);
+    let ipc_command_receiver = ipc_server
+        .as_mut()
+        .and_then(IpcServer::take_command_receiver);
     let mut terminal = tui::init()?;
     let run_result = tui::run(
         &mut terminal,
@@ -67,9 +96,15 @@ async fn main() -> Result<()> {
         symbol_client,
         hierarchy_client,
         lsp_status_receiver,
+        ipc_event_sender,
+        ipc_command_receiver,
     );
     let restore_result = tui::restore(&mut terminal);
     let mut result = run_result.and(restore_result);
+
+    if let Some(ipc_server) = ipc_server {
+        result = result.and(ipc_server.shutdown().await);
+    }
 
     if let Some(lsp) = lsp {
         result = result.and(lsp.shutdown().await);
@@ -95,7 +130,7 @@ fn start_tree_sitter_fallback(workspace: &Path, app: &mut App) -> Option<TreeSit
     match TreeSitterProvider::start(workspace, language) {
         Ok(provider) => {
             let mut status = AnalysisStatus::tree_sitter(language.name(), AnalysisPhase::Ready);
-            status.message = Some("Grammar/query ready; search needs LSP".to_owned());
+            status.message = Some("Syntax index builds on first search or expansion".to_owned());
             app.set_analysis_status(status);
             Some(provider)
         }
@@ -162,25 +197,31 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use clap::Parser;
-    use ctree::{
+    use cgraph::{
         app::{AnalysisBackend, AnalysisPhase, App},
         cli::Cli,
+        fetch::HierarchyQuery,
+        state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
     };
+    use clap::Parser;
 
     use super::start_tree_sitter_fallback;
 
-    #[test]
-    fn initializes_tree_sitter_fallback_and_reports_ready() {
+    #[tokio::test]
+    async fn initializes_a_queryable_tree_sitter_fallback_and_reports_ready() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("ctree-main-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("cgraph-main-{unique}"));
         fs::create_dir(&workspace).unwrap();
-        fs::write(workspace.join("main.py"), "def main():\n    pass\n").unwrap();
+        fs::write(
+            workspace.join("main.py"),
+            "def helper():\n    pass\n\ndef main():\n    helper()\n",
+        )
+        .unwrap();
         let cli = Cli::try_parse_from([
-            "ctree",
+            "cgraph",
             "--no-lsp",
             "--workspace",
             workspace.to_str().unwrap(),
@@ -190,12 +231,39 @@ mod tests {
 
         let provider = start_tree_sitter_fallback(&workspace, &mut app);
 
-        assert!(provider.is_some());
+        let provider = provider.unwrap();
         assert_eq!(
             app.analysis_status.backend,
             AnalysisBackend::TreeSitter("Python".to_owned())
         );
         assert_eq!(app.analysis_status.phase, AnalysisPhase::Ready);
+        let symbols = provider.workspace_symbol_client().query("").await.unwrap();
+        let main = symbols.iter().find(|symbol| symbol.name == "main").unwrap();
+        let position = main.range.unwrap().start;
+        let response = provider
+            .hierarchy_client()
+            .query(HierarchyQuery {
+                symbol: SymbolIdentity {
+                    symbol: "main".to_owned(),
+                    kind: HierarchyKind::Call,
+                    location: Some(SourceLocation {
+                        uri: main.uri.to_string(),
+                        line: Some(position.line),
+                        character: Some(position.character),
+                    }),
+                },
+                direction: HierarchyDirection::Outgoing,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .children
+                .iter()
+                .map(|child| child.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["helper"]
+        );
         fs::remove_dir_all(workspace).unwrap();
     }
 }

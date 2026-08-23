@@ -17,14 +17,18 @@
 | [REQ-4-1 节点选择与导航](REQ-4-1-selection.md) | `Implemented` | 选中样式、鼠标和空间键盘导航 |
 | [REQ-4-2 无限画布和平移](REQ-4-2-viewport.md) | `Implemented` | 世界坐标、viewport 和拖拽 |
 | [REQ-4-3 有向图布局与反向边](REQ-4-3-graph-layout.md) | `Implemented` | 全局节点去重、分层布局和循环边标记 |
+| [REQ-4-4 连线可读性](REQ-4-4-connection-legibility.md) | `Implemented` | 标准 Unicode 字形、方向箭头和交叉点语义 |
+| [REQ-4-5 操作帮助与快捷提示](REQ-4-5-help.md) | `Implemented` | `?` 完整帮助和精简 footer 提示 |
 
 ## 父需求验收
 
 - 多个 anchor、共享节点和展开关系可以同时布局，语义相同节点不会重复出现。
 - 键盘与鼠标作用于相同命中区域和选择状态。
+- 选择或 toggle 已有节点时，该节点保持当前屏幕位置，不因布局重新锚定而跳动。
 - 终端 resize 和画布平移不会破坏节点身份或图状态。
 - 正常关系保持 caller/parent 在左、callee/child 在右；无法满足该方向的边有明确特殊标记。
+- 连线的拐角、目标和交叉点不只依赖颜色区分，并且不要求安装特定图标字体。
 
 ## 当前实现
 
-世界坐标、viewport 投影、节点框、连接线、鼠标命中、空间导航和拖拽已经实现。画布从 anchor 可见图计算 SCC，将收缩 DAG 分层，并以双线和箭头标记循环、自环或其他非前向边；三个子需求均已交付。
+世界坐标、viewport 投影、节点框、连接线、鼠标命中、空间导航和拖拽已经实现。画布从 anchor 可见图计算 SCC，将收缩 DAG 分层，并以双线和箭头标记循环、自环或其他非前向边；连线使用标准 Unicode box-drawing 字符，并对真实交叉点提供字符与样式双重提示。

@@ -9,7 +9,7 @@
 
 ## 需求
 
-ctree 应接收标准 LSP work-done progress，并在 rust-analyzer 可用时接收其 server status notification。状态至少包含 server 名称、阶段、消息和可选百分比。
+cgraph 应接收标准 LSP work-done progress，并在 rust-analyzer 可用时接收其 server status notification。状态至少包含 server 名称、阶段、消息和可选百分比。
 
 ## 验收条件
 

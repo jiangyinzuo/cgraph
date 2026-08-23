@@ -27,4 +27,4 @@
 
 ## 当前实现与差距
 
-LSP progress、统一底部状态栏和 Tree-sitter fallback 状态均已交付。Tree-sitter 会初始化对应 grammar 与 tags query；它当前只表示语法分析准备完成，workspace symbol 搜索仍明确依赖 LSP。
+LSP progress、统一底部状态栏和 Tree-sitter fallback 状态均已交付。Tree-sitter 会初始化对应 grammar 与 tags query，Ready 消息说明项目静态索引在第一次查询时建立；搜索 modal/分支 loading 表示单次工作，hierarchy 完成后的 footer notice 明确说明语法级置信度。

@@ -1,2 +1,0 @@
-[filters]
-symbols = ["*::into", "*::is_some", "*::Some"]

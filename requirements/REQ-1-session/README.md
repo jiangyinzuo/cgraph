@@ -8,7 +8,7 @@
 
 ## 目标
 
-用户能够从当前工作区启动 ctree，选择空画布或指定初始 call/type anchor，并可靠退出 TUI。
+用户能够从当前工作区启动 cgraph，选择空画布或指定初始 call/type anchor，并可靠退出 TUI。
 
 ## 子需求
 
@@ -19,8 +19,8 @@
 
 ## 父需求验收
 
-- `ctree` 能打开空画布。
-- `ctree call <SYMBOL>` 和 `ctree type <SYMBOL>` 能显示对应 anchor。
+- `cgraph` 能打开空画布。
+- `cgraph call <SYMBOL>` 和 `cgraph type <SYMBOL>` 能显示对应 anchor。
 - 用户能正常退出，终端 raw mode、备用屏幕和鼠标捕获被恢复。
 
 ## 当前边界

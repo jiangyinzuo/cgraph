@@ -5,9 +5,9 @@ use std::{ffi::OsString, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "ctree", version, about)]
+#[command(name = "cgraph", version, about)]
 pub struct Cli {
-    /// Language server executable. If omitted, ctree detects common project types.
+    /// Language server executable. If omitted, cgraph detects common project types.
     #[arg(long, global = true, value_name = "PROGRAM", conflicts_with = "no_lsp")]
     pub lsp: Option<OsString>,
 
@@ -28,6 +28,10 @@ pub struct Cli {
     /// Disable automatic language server startup.
     #[arg(long, global = true, conflicts_with = "lsp")]
     pub no_lsp: bool,
+
+    /// Listen for editor IPC clients on this Unix socket path.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub ipc_socket: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -54,7 +58,7 @@ mod tests {
 
     #[test]
     fn parses_call_query() {
-        let cli = Cli::try_parse_from(["ctree", "call", "Foo::Bar"]).unwrap();
+        let cli = Cli::try_parse_from(["cgraph", "call", "Foo::Bar"]).unwrap();
 
         assert!(matches!(
             cli.command,
@@ -64,7 +68,7 @@ mod tests {
 
     #[test]
     fn accepts_an_empty_canvas() {
-        let cli = Cli::try_parse_from(["ctree"]).unwrap();
+        let cli = Cli::try_parse_from(["cgraph"]).unwrap();
 
         assert!(cli.command.is_none());
     }
@@ -72,7 +76,7 @@ mod tests {
     #[test]
     fn parses_language_server_options_after_subcommand() {
         let cli = Cli::try_parse_from([
-            "ctree",
+            "cgraph",
             "type",
             "Student",
             "--lsp",
@@ -87,5 +91,22 @@ mod tests {
             Some(std::ffi::OsStr::new("rust-analyzer"))
         );
         assert_eq!(cli.workspace, std::path::Path::new("/tmp/project"));
+    }
+
+    #[test]
+    fn parses_an_ipc_socket_path() {
+        let cli = Cli::try_parse_from([
+            "cgraph",
+            "--ipc-socket",
+            "/run/user/1000/cgraph.sock",
+            "call",
+            "main",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.ipc_socket.as_deref(),
+            Some(std::path::Path::new("/run/user/1000/cgraph.sock"))
+        );
     }
 }

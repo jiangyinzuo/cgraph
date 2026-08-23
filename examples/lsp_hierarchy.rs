@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
-use ctree::{
+use cgraph::{
     fetch::{
         HierarchyQuery,
         lsp::{LspConfig, LspProvider},

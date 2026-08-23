@@ -214,6 +214,14 @@ impl RelationGraph {
         self.graph.node_weight_mut(index)
     }
 
+    pub fn nodes_named(&self, symbol: &str, kind: HierarchyKind) -> Vec<NodeId> {
+        self.graph
+            .node_weights()
+            .filter(|node| node.symbol == symbol && node.kind == kind)
+            .map(|node| node.id)
+            .collect()
+    }
+
     pub fn resolve_id(&self, mut node_id: NodeId) -> Option<NodeId> {
         let mut visited = HashSet::new();
         while let Some(next) = self.redirects.get(&node_id) {
@@ -300,6 +308,17 @@ impl RelationGraph {
     }
 
     pub fn visible_graph(&self) -> VisibleGraph {
+        self.project_graph(true)
+    }
+
+    /// Returns every relation currently known from an anchor, including cached
+    /// branches that are collapsed in the canvas. Orphaned storage left behind
+    /// after unpinning or clearing a branch is intentionally excluded.
+    pub fn known_graph(&self) -> VisibleGraph {
+        self.project_graph(false)
+    }
+
+    fn project_graph(&self, expanded_only: bool) -> VisibleGraph {
         let mut visible = VisibleGraph::default();
         let mut seen_nodes = HashSet::new();
         let mut seen_edges = HashSet::new();
@@ -318,7 +337,7 @@ impl RelationGraph {
             };
             for direction in [HierarchyDirection::Incoming, HierarchyDirection::Outgoing] {
                 let branch = node.branch(direction);
-                if !branch.expanded {
+                if expanded_only && !branch.expanded {
                     continue;
                 }
                 for neighbor in &branch.neighbors {
@@ -429,10 +448,12 @@ impl RelationGraph {
                 (source, target, edge.weight().clone())
             })
             .collect::<Vec<_>>();
-        let source_node = self
+        let mut source_node = self
             .graph
             .remove_node(source_index)
             .expect("source node exists while merging");
+        replace_neighbor(&mut source_node.incoming.neighbors, source_id, target_id);
+        replace_neighbor(&mut source_node.outgoing.neighbors, source_id, target_id);
         self.by_id.remove(&source_id);
         self.redirects.insert(source_id, target_id);
         self.by_identity.retain(|_, value| *value != source_id);
@@ -743,6 +764,41 @@ mod tests {
     }
 
     #[test]
+    fn retargets_existing_edges_when_resolving_a_provisional_anchor() {
+        let mut graph = RelationGraph::default();
+        let provisional = graph.pin_symbol(SymbolIdentity {
+            symbol: "target".to_owned(),
+            kind: HierarchyKind::Call,
+            location: None,
+        });
+        let child = graph
+            .replace_branch_neighbors(
+                provisional,
+                HierarchyDirection::Outgoing,
+                vec![symbol("child", 5)],
+            )
+            .unwrap()[0];
+        graph.node_mut(provisional).unwrap().outgoing.expanded = true;
+        let existing = graph.insert_symbol(symbol("Module::target", 4));
+
+        let resolved = graph
+            .resolve_symbol(provisional, symbol("Module::target", 4))
+            .unwrap();
+        let visible = graph.visible_graph();
+
+        assert_eq!(resolved, existing);
+        assert_eq!(graph.edge_count(), 1);
+        assert_eq!(visible.nodes, [existing, child]);
+        assert_eq!(
+            visible.edges,
+            [VisibleEdge {
+                source: existing,
+                target: child,
+            }]
+        );
+    }
+
+    #[test]
     fn clearing_one_branch_keeps_an_edge_observed_by_the_other_endpoint() {
         let mut graph = RelationGraph::default();
         let caller = graph.pin_symbol(symbol("caller", 0));
@@ -770,5 +826,28 @@ mod tests {
         );
         assert!(graph.clear_branch(callee, HierarchyDirection::Incoming));
         assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn known_graph_includes_collapsed_cache_and_excludes_cleared_orphans() {
+        let mut graph = RelationGraph::default();
+        let root = graph.pin_symbol(symbol("root", 0));
+        let child = graph
+            .replace_branch_neighbors(root, HierarchyDirection::Outgoing, vec![symbol("child", 1)])
+            .unwrap()[0];
+
+        assert_eq!(graph.visible_graph().nodes, [root]);
+        assert_eq!(graph.known_graph().nodes, [root, child]);
+        assert_eq!(
+            graph.known_graph().edges,
+            [VisibleEdge {
+                source: root,
+                target: child,
+            }]
+        );
+
+        assert!(graph.clear_branch(root, HierarchyDirection::Outgoing));
+        assert_eq!(graph.known_graph().nodes, [root]);
+        assert!(graph.known_graph().edges.is_empty());
     }
 }

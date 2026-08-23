@@ -186,6 +186,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "call-graph-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "petgraph",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tower-lsp",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "unicode-width",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,28 +367,6 @@ checksum = "eb2a7d3066da2de787b7f032c736763eb7ae5d355f81a68bab2675a96008b0bf"
 dependencies = [
  "lab",
  "phf",
-]
-
-[[package]]
-name = "ctree"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "petgraph",
- "ratatui",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tower-lsp",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-cpp",
- "tree-sitter-python",
- "tree-sitter-rust",
- "unicode-width",
 ]
 
 [[package]]

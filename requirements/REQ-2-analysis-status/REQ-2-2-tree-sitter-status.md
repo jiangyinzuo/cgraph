@@ -19,7 +19,7 @@ Tree-sitter provider 启用后，应通过通用分析状态模型显示语言�
 
 ## 当前实现与差距
 
-当 LSP 不可用时，ctree 会浅层检测 Rust、C、C++ 或 Python 工作区，初始化对应 parser grammar 和 tags query，并通过统一状态模型报告 Working、Ready 或 Error。provider 保留可用 parser；workspace symbol 和 hierarchy 的 Tree-sitter 查询仍属于其他需求，不会被本状态伪装成已经支持。
+当 LSP 不可用时，cgraph 会浅层检测 Rust、C、C++ 或 Python 工作区，初始化对应 parser grammar 和 tags query，并通过统一状态模型报告 Working、Ready 或 Error。Ready 消息说明静态索引会在第一次搜索或展开时惰性建立；搜索弹窗继续显示单次索引/查询状态。Tree-sitter hierarchy 结果还会在 footer notice 中明确标为 `syntactic relations only`，与完整 LSP 语义区分。
 
 ## 实现证据
 

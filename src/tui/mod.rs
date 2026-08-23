@@ -3,7 +3,7 @@
 use std::{
     io::{self, Stdout},
     sync::mpsc::{self, Sender},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -22,45 +22,45 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Paragraph},
 };
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::task::JoinHandle;
 
 use crate::{
     app::{
-        AnalysisBackend, AnalysisPhase, AnalysisStatus, App, HierarchyLoadRequest, SearchItem,
-        SearchKind, SearchRequest, SearchState, SearchStatus,
+        AnalysisBackend, AnalysisPhase, AnalysisStatus, App, HierarchyLoadRequest, SearchKind,
+        SearchRequest,
     },
-    fetch::lsp::{HierarchyClient, LspStatusUpdate, WorkspaceSymbolClient, WorkspaceSymbolMatch},
-    state::{
-        HierarchyDirection, LoadState, NodeId, SourceLocation,
-        graph::{GraphBranch, GraphNode},
+    fetch::{HierarchyClient, WorkspaceSymbolClient, lsp::LspStatusUpdate},
+    ipc::{
+        IpcCommand, IpcEventSender,
+        protocol::{IpcRequest, IpcResponse},
     },
+    state::{HierarchyDirection, NodeId, SourceLocation},
 };
-use tower_lsp::lsp_types::SymbolKind;
 
 mod canvas;
+mod config_editor;
+mod help;
+mod save;
+mod search;
 
-use canvas::{CanvasConnections, CanvasNodePlacement, canvas_layout};
+use canvas::{
+    CanvasConnections, CanvasNodePlacement, CanvasNodeWidget, canvas_layout, world_canvas_layout,
+};
 #[cfg(test)]
-use canvas::{EdgeVisualKind, placement_bounds, world_canvas_layout, world_rects_overlap};
+use canvas::{EdgeVisualKind, placement_bounds, world_rects_overlap};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-enum SearchQueryEvent {
-    Started(u64),
-    Finished {
-        request_id: u64,
-        result: Result<Vec<SearchItem>, String>,
-    },
-}
-
 enum InteractionRequest {
     Search(SearchRequest),
-    Hierarchy(HierarchyLoadRequest),
+    Hierarchy(Vec<HierarchyLoadRequest>),
+    OpenLocation(SourceLocation),
+    EditConfig,
 }
 
 struct HierarchyQueryEvent {
@@ -68,12 +68,20 @@ struct HierarchyQueryEvent {
     result: Result<crate::fetch::HierarchyResponse, String>,
 }
 
-const WORKSPACE_SYMBOL_SEARCH_DELAY: Duration = Duration::from_millis(200);
-
 #[derive(Default)]
 struct CanvasDragState {
     previous: Option<(u16, u16)>,
+    pressed_node: Option<NodeId>,
+    dragged: bool,
+    last_click: Option<CanvasClick>,
 }
+
+struct CanvasClick {
+    node_id: NodeId,
+    at: Instant,
+}
+
+const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NavigationDirection {
@@ -101,23 +109,42 @@ pub fn restore(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
+fn resume(terminal: &mut Tui) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.clear()?;
+    terminal.hide_cursor()?;
+    Ok(())
+}
+
 pub fn run(
     terminal: &mut Tui,
     app: &mut App,
     symbol_client: Option<WorkspaceSymbolClient>,
     hierarchy_client: Option<HierarchyClient>,
     mut lsp_status_receiver: Option<UnboundedReceiver<LspStatusUpdate>>,
+    ipc_event_sender: Option<IpcEventSender>,
+    mut ipc_command_receiver: Option<tokio::sync::mpsc::Receiver<IpcCommand>>,
 ) -> Result<()> {
     // Crossterm is currently polled synchronously, while LSP work runs on the
     // Tokio runtime. A small channel keeps async completion out of App and lets
     // the loop continue rendering loading state and receiving input.
-    let (query_sender, query_receiver) = mpsc::channel::<SearchQueryEvent>();
+    let (query_sender, query_receiver) = mpsc::channel::<search::QueryEvent>();
     let (hierarchy_sender, hierarchy_receiver) = mpsc::channel::<HierarchyQueryEvent>();
     let mut search_task: Option<JoinHandle<()>> = None;
     let mut hierarchy_tasks = Vec::<JoinHandle<()>>::new();
     let mut canvas_drag = CanvasDragState::default();
 
     while !app.should_quit {
+        if let Some(receiver) = ipc_command_receiver.as_mut() {
+            while let Ok(command) = receiver.try_recv() {
+                apply_ipc_command(app, command);
+            }
+        }
         if let Some(receiver) = lsp_status_receiver.as_mut() {
             while let Ok(status) = receiver.try_recv() {
                 apply_lsp_status(app, status);
@@ -125,14 +152,16 @@ pub fn run(
         }
         while let Ok(query_event) = query_receiver.try_recv() {
             match query_event {
-                SearchQueryEvent::Started(request_id) => app.start_search(request_id),
-                SearchQueryEvent::Finished { request_id, result } => {
+                search::QueryEvent::Started(request_id) => app.start_search(request_id),
+                search::QueryEvent::Finished { request_id, result } => {
                     app.finish_search(request_id, result);
                 }
             }
         }
         while let Ok(event) = hierarchy_receiver.try_recv() {
-            app.finish_hierarchy(&event.request, event.result);
+            with_stable_node_position(app, event.request.node_id, |app| {
+                app.finish_hierarchy(&event.request, event.result);
+            });
         }
         hierarchy_tasks.retain(|task| !task.is_finished());
         terminal.draw(|frame| render(frame, app))?;
@@ -155,19 +184,40 @@ pub fn run(
             match request {
                 Some(InteractionRequest::Search(request)) => {
                     if let Some(client) = symbol_client.clone() {
-                        let next_task = schedule_search(client, request, query_sender.clone());
+                        let next_task = search::schedule(client, request, query_sender.clone());
                         if let Some(previous_task) = search_task.replace(next_task) {
                             previous_task.abort();
                         }
                     }
                 }
-                Some(InteractionRequest::Hierarchy(request)) => {
+                Some(InteractionRequest::Hierarchy(requests)) => {
                     if let Some(client) = hierarchy_client.clone() {
-                        hierarchy_tasks.push(schedule_hierarchy(
-                            client,
-                            request,
-                            hierarchy_sender.clone(),
-                        ));
+                        for request in requests {
+                            hierarchy_tasks.push(schedule_hierarchy(
+                                client.clone(),
+                                request,
+                                hierarchy_sender.clone(),
+                            ));
+                        }
+                    }
+                }
+                Some(InteractionRequest::OpenLocation(location)) => {
+                    send_open_location(app, ipc_event_sender.as_ref(), &location);
+                }
+                Some(InteractionRequest::EditConfig) => {
+                    let requests = config_editor::edit_project_config(
+                        terminal,
+                        app,
+                        hierarchy_client.is_some(),
+                    )?;
+                    if let Some(client) = hierarchy_client.clone() {
+                        for request in requests {
+                            hierarchy_tasks.push(schedule_hierarchy(
+                                client.clone(),
+                                request,
+                                hierarchy_sender.clone(),
+                            ));
+                        }
                     }
                 }
                 None => {}
@@ -183,6 +233,54 @@ pub fn run(
     }
 
     Ok(())
+}
+
+fn apply_ipc_command(app: &mut App, command: IpcCommand) {
+    let request_id = command.request_id();
+    let (request, responder) = command.into_parts();
+    let response = match request {
+        IpcRequest::FocusSymbol {
+            hierarchy,
+            symbol,
+            location,
+        } => match app.focus_symbol(crate::state::SymbolIdentity {
+            symbol: symbol.clone(),
+            kind: hierarchy,
+            location,
+        }) {
+            Ok(_) => {
+                app.canvas_notice = Some(format!(
+                    "IPC request {request_id} focused {} symbol {symbol:?}",
+                    match hierarchy {
+                        crate::state::HierarchyKind::Call => "call",
+                        crate::state::HierarchyKind::Type => "type",
+                    }
+                ));
+                IpcResponse::Accepted
+            }
+            Err(message) => IpcResponse::Error { message },
+        },
+    };
+    if let Err(error) = responder.respond(response) {
+        app.canvas_notice = Some(format!("IPC response {request_id} failed: {error:#}"));
+    }
+}
+
+fn send_open_location(
+    app: &mut App,
+    event_sender: Option<&IpcEventSender>,
+    location: &SourceLocation,
+) {
+    let Some(event_sender) = event_sender else {
+        app.canvas_notice =
+            Some("IPC is not enabled; start cgraph with --ipc-socket <PATH>".to_owned());
+        return;
+    };
+    app.canvas_notice = Some(match event_sender.send_open_location(location) {
+        Ok(1) => "Sent source location to 1 IPC client".to_owned(),
+        Ok(client_count) => format!("Sent source location to {client_count} IPC clients"),
+        Err(error) => format!("IPC open-location failed: {error:#}"),
+    });
 }
 
 fn schedule_hierarchy(
@@ -246,111 +344,45 @@ fn apply_lsp_status(app: &mut App, update: LspStatusUpdate) {
     app.set_analysis_status(status);
 }
 
-fn schedule_search(
-    client: WorkspaceSymbolClient,
-    request: SearchRequest,
-    sender: Sender<SearchQueryEvent>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        sleep(WORKSPACE_SYMBOL_SEARCH_DELAY).await;
-        if sender
-            .send(SearchQueryEvent::Started(request.request_id))
-            .is_err()
-        {
-            return;
-        }
-        let result = client
-            .query(&request.query)
-            .await
-            .map(|symbols| {
-                symbols
-                    .into_iter()
-                    .filter(|symbol| symbol_matches_search(request.kind, symbol.kind))
-                    .map(search_item)
-                    .collect()
-            })
-            .map_err(|error| format!("{error:#}"));
-        let _ = sender.send(SearchQueryEvent::Finished {
-            request_id: request.request_id,
-            result,
-        });
-    })
-}
-
-fn search_item(symbol: WorkspaceSymbolMatch) -> SearchItem {
-    let name = symbol.display_name();
-    let uri = symbol.uri.to_string();
-    let path = symbol
-        .uri
-        .to_file_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|()| symbol.uri.to_string());
-    let (location, line, character) = symbol.range.map_or_else(
-        || (path.clone(), None, None),
-        |range| {
-            (
-                format!("{path}:{}", range.start.line + 1),
-                Some(range.start.line),
-                Some(range.start.character),
-            )
-        },
-    );
-
-    SearchItem {
-        name,
-        container_name: symbol.container_name,
-        location,
-        source: Some(SourceLocation {
-            uri,
-            line,
-            character,
-        }),
-    }
-}
-
-fn symbol_matches_search(search_kind: SearchKind, symbol_kind: SymbolKind) -> bool {
-    match search_kind {
-        SearchKind::Call => matches!(
-            symbol_kind,
-            SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::CONSTRUCTOR
-        ),
-        SearchKind::Type => matches!(
-            symbol_kind,
-            SymbolKind::CLASS
-                | SymbolKind::INTERFACE
-                | SymbolKind::STRUCT
-                | SymbolKind::ENUM
-                | SymbolKind::TYPE_PARAMETER
-        ),
-    }
-}
-
 fn handle_event(
     app: &mut App,
     event: Event,
-    lsp_available: bool,
+    analysis_available: bool,
     screen: Rect,
     canvas_drag: &mut CanvasDragState,
 ) -> Option<InteractionRequest> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            let request = if app.search.is_some() {
-                handle_search_key(app, key).map(InteractionRequest::Search)
+            let request = if app.help.is_some() {
+                help::handle_key(app, key);
+                None
+            } else if app.search.is_some() {
+                search::handle_key(app, key).map(InteractionRequest::Search)
+            } else if app.save.is_some() {
+                save::handle_key(app, key);
+                None
             } else {
-                handle_canvas_key(app, key, lsp_available, screen)
+                handle_canvas_key(app, key, analysis_available, screen)
             };
-            if app.search.is_some() {
-                canvas_drag.previous = None;
+            if app.search.is_some() || app.save.is_some() || app.help.is_some() {
+                *canvas_drag = CanvasDragState::default();
             }
             request
         }
         Event::Mouse(mouse) => {
-            if app.search.is_some() {
-                canvas_drag.previous = None;
-                handle_search_mouse(app, mouse, screen);
+            if app.help.is_some() {
+                *canvas_drag = CanvasDragState::default();
+                help::handle_mouse(app, mouse);
+                None
+            } else if app.search.is_some() {
+                *canvas_drag = CanvasDragState::default();
+                search::handle_mouse(app, mouse, screen);
+                None
+            } else if app.save.is_some() {
+                *canvas_drag = CanvasDragState::default();
                 None
             } else {
-                handle_canvas_mouse(app, mouse, lsp_available, screen, canvas_drag)
+                handle_canvas_mouse(app, mouse, analysis_available, screen, canvas_drag)
             }
         }
         _ => None,
@@ -360,17 +392,17 @@ fn handle_event(
 fn handle_canvas_key(
     app: &mut App,
     key: KeyEvent,
-    lsp_available: bool,
+    analysis_available: bool,
     screen: Rect,
 ) -> Option<InteractionRequest> {
     if let Some(prefix) = app.pending_key.take() {
         return match prefix {
             'a' => match key.code {
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => app
-                    .open_search(SearchKind::Call, lsp_available)
+                    .open_search(SearchKind::Call, analysis_available)
                     .map(InteractionRequest::Search),
                 KeyCode::Char('t') if key.modifiers == KeyModifiers::NONE => app
-                    .open_search(SearchKind::Type, lsp_available)
+                    .open_search(SearchKind::Type, analysis_available)
                     .map(InteractionRequest::Search),
                 _ => None,
             },
@@ -389,17 +421,29 @@ fn handle_canvas_key(
                 }
                 None
             }
+            'e' => {
+                if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE {
+                    return Some(InteractionRequest::EditConfig);
+                }
+                None
+            }
             't' => {
                 match key.code {
                     KeyCode::Char('l') if key.modifiers == KeyModifiers::NONE => {
-                        return app
-                            .toggle_selected_branch(HierarchyDirection::Incoming, lsp_available)
-                            .map(InteractionRequest::Hierarchy);
+                        return toggle_selected_branch_stably(
+                            app,
+                            HierarchyDirection::Incoming,
+                            analysis_available,
+                        )
+                        .map(|request| InteractionRequest::Hierarchy(vec![request]));
                     }
                     KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
-                        return app
-                            .toggle_selected_branch(HierarchyDirection::Outgoing, lsp_available)
-                            .map(InteractionRequest::Hierarchy);
+                        return toggle_selected_branch_stably(
+                            app,
+                            HierarchyDirection::Outgoing,
+                            analysis_available,
+                        )
+                        .map(|request| InteractionRequest::Hierarchy(vec![request]));
                     }
                     _ => {}
                 }
@@ -416,6 +460,9 @@ fn handle_canvas_key(
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => {
             app.pending_key = Some('d');
         }
+        KeyCode::Char('e') if key.modifiers == KeyModifiers::NONE => {
+            app.pending_key = Some('e');
+        }
         KeyCode::Char('t') if key.modifiers == KeyModifiers::NONE => {
             app.pending_key = Some('t');
         }
@@ -431,77 +478,21 @@ fn handle_canvas_key(
         KeyCode::Down | KeyCode::Char('j') if key.modifiers == KeyModifiers::NONE => {
             move_canvas_selection(app, NavigationDirection::Down, screen);
         }
+        KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => {
+            let requests = app.refresh_selected_branches(analysis_available);
+            if !requests.is_empty() {
+                return Some(InteractionRequest::Hierarchy(requests));
+            }
+        }
+        KeyCode::Char('w') if key.modifiers == KeyModifiers::NONE => app.open_save(),
+        KeyCode::Char('?') if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+            app.open_help();
+        }
         KeyCode::Char('q') | KeyCode::Esc => app.quit(),
         _ => {}
     }
 
     None
-}
-
-fn handle_search_key(app: &mut App, key: KeyEvent) -> Option<SearchRequest> {
-    match key.code {
-        KeyCode::Esc => {
-            app.close_search();
-            None
-        }
-        KeyCode::Enter => {
-            app.accept_search_selection();
-            None
-        }
-        KeyCode::Up => {
-            app.move_search_selection(-1);
-            None
-        }
-        KeyCode::Down => {
-            app.move_search_selection(1);
-            None
-        }
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.move_search_selection(-1);
-            None
-        }
-        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.move_search_selection(1);
-            None
-        }
-        KeyCode::Backspace => app.pop_search_char(),
-        KeyCode::Char(character)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            app.push_search_char(character)
-        }
-        _ => None,
-    }
-}
-
-fn handle_search_mouse(app: &mut App, mouse: MouseEvent, screen: Rect) {
-    let Some(search) = app.search.as_ref() else {
-        return;
-    };
-    let (_, _, list_area) = search_layout(screen);
-    if !list_area.contains((mouse.column, mouse.row).into()) || search.items.is_empty() {
-        return;
-    }
-
-    // Ratatui scrolls a selected item into view. Reconstruct the same minimal
-    // offset here so mouse rows keep addressing the item shown under the cursor.
-    let visible_items = usize::from(list_area.height);
-    let selected = search.selected.unwrap_or(0);
-    let offset = selected.saturating_add(1).saturating_sub(visible_items);
-    let index = offset + usize::from(mouse.row.saturating_sub(list_area.y));
-
-    match mouse.kind {
-        MouseEventKind::Moved => app.select_search_item(index),
-        MouseEventKind::Down(MouseButton::Left) => {
-            app.select_search_item(index);
-            app.accept_search_selection();
-        }
-        MouseEventKind::ScrollUp => app.move_search_selection(-1),
-        MouseEventKind::ScrollDown => app.move_search_selection(1),
-        _ => {}
-    }
 }
 
 fn handle_canvas_mouse(
@@ -514,6 +505,8 @@ fn handle_canvas_mouse(
     match mouse.kind {
         MouseEventKind::Drag(MouseButton::Left) => {
             let (previous_column, previous_row) = drag.previous?;
+            drag.dragged = true;
+            drag.last_click = None;
             app.pan_viewport(
                 i32::from(mouse.column) - i32::from(previous_column),
                 i32::from(mouse.row) - i32::from(previous_row),
@@ -522,8 +515,11 @@ fn handle_canvas_mouse(
             return None;
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            let request = finish_canvas_click(app, mouse, screen, drag);
             drag.previous = None;
-            return None;
+            drag.pressed_node = None;
+            drag.dragged = false;
+            return request;
         }
         MouseEventKind::Down(MouseButton::Left) => {}
         _ => return None,
@@ -531,48 +527,99 @@ fn handle_canvas_mouse(
     let point = (mouse.column, mouse.row).into();
     let canvas = canvas_inner_area(screen);
     if !canvas.contains(point) {
-        drag.previous = None;
+        *drag = CanvasDragState::default();
         return None;
     }
     let layout = canvas_layout(canvas, &app.graph, app.selected, app.viewport);
 
-    if let Some(placement) = layout
+    if let Some(node_id) = layout
         .nodes
         .iter()
         .find(|placement| placement.incoming_button.contains(point))
+        .map(|placement| placement.node_id)
     {
-        drag.previous = None;
-        return app
-            .toggle_node_branch(
-                placement.node_id,
-                HierarchyDirection::Incoming,
-                hierarchy_available,
-            )
-            .map(InteractionRequest::Hierarchy);
+        *drag = CanvasDragState::default();
+        return with_stable_node_position(app, node_id, |app| {
+            app.toggle_node_branch(node_id, HierarchyDirection::Incoming, hierarchy_available)
+        })
+        .map(|request| InteractionRequest::Hierarchy(vec![request]));
     }
-    if let Some(placement) = layout
+    if let Some(node_id) = layout
         .nodes
         .iter()
         .find(|placement| placement.outgoing_button.contains(point))
+        .map(|placement| placement.node_id)
     {
-        drag.previous = None;
-        return app
-            .toggle_node_branch(
-                placement.node_id,
-                HierarchyDirection::Outgoing,
-                hierarchy_available,
-            )
-            .map(InteractionRequest::Hierarchy);
+        *drag = CanvasDragState::default();
+        return with_stable_node_position(app, node_id, |app| {
+            app.toggle_node_branch(node_id, HierarchyDirection::Outgoing, hierarchy_available)
+        })
+        .map(|request| InteractionRequest::Hierarchy(vec![request]));
     }
-    if let Some(placement) = layout
+    if let Some(node_id) = layout
         .nodes
         .iter()
         .find(|placement| placement.area.contains(point))
+        .map(|placement| placement.node_id)
     {
-        app.select_node(placement.node_id);
+        with_stable_node_position(app, node_id, |app| app.select_node(node_id));
+        drag.pressed_node = Some(node_id);
+    } else {
+        drag.pressed_node = None;
+        drag.last_click = None;
     }
+    drag.dragged = false;
     drag.previous = Some((mouse.column, mouse.row));
     None
+}
+
+fn finish_canvas_click(
+    app: &mut App,
+    mouse: MouseEvent,
+    screen: Rect,
+    drag: &mut CanvasDragState,
+) -> Option<InteractionRequest> {
+    if drag.dragged {
+        return None;
+    }
+    let node_id = drag.pressed_node?;
+    let point = (mouse.column, mouse.row).into();
+    let canvas = canvas_inner_area(screen);
+    if !canvas.contains(point) {
+        drag.last_click = None;
+        return None;
+    }
+    let released_on_same_node = canvas_layout(canvas, &app.graph, app.selected, app.viewport)
+        .nodes
+        .iter()
+        .any(|placement| placement.node_id == node_id && placement.area.contains(point));
+    if !released_on_same_node {
+        drag.last_click = None;
+        return None;
+    }
+
+    let now = Instant::now();
+    let is_double_click = drag.last_click.as_ref().is_some_and(|click| {
+        click.node_id == node_id && now.duration_since(click.at) <= DOUBLE_CLICK_TIMEOUT
+    });
+    if !is_double_click {
+        drag.last_click = Some(CanvasClick { node_id, at: now });
+        return None;
+    }
+    drag.last_click = None;
+
+    let Some(location) = app
+        .graph
+        .node(node_id)
+        .and_then(|node| node.location.clone())
+        .filter(|location| {
+            !location.uri.is_empty() && location.line.is_some() && location.character.is_some()
+        })
+    else {
+        app.canvas_notice = Some("Selected node has no exact source location".to_owned());
+        return None;
+    };
+    Some(InteractionRequest::OpenLocation(location))
 }
 
 fn move_canvas_selection(app: &mut App, direction: NavigationDirection, screen: Rect) -> bool {
@@ -585,13 +632,13 @@ fn move_canvas_selection(app: &mut App, direction: NavigationDirection, screen: 
     let Some(current) = current_placement(&layout.nodes, app.selected) else {
         return false;
     };
-    let current_center = rect_center(current.area);
+    let current_center = rect_center(current.visible_slot);
     let next = layout
         .nodes
         .iter()
         .filter(|candidate| candidate.node_id != current.node_id)
         .filter_map(|candidate| {
-            let candidate_center = rect_center(candidate.area);
+            let candidate_center = rect_center(candidate.visible_slot);
             navigation_score(current_center, candidate_center, direction)
                 .map(|score| (score, candidate.node_id))
         })
@@ -599,13 +646,61 @@ fn move_canvas_selection(app: &mut App, direction: NavigationDirection, screen: 
     let Some((_, node_id)) = next else {
         return false;
     };
-    app.select_node(node_id)
+    with_stable_node_position(app, node_id, |app| app.select_node(node_id))
 }
 
-fn current_placement<'a>(
-    layout: &'a [CanvasNodePlacement],
+fn toggle_selected_branch_stably(
+    app: &mut App,
+    direction: HierarchyDirection,
+    hierarchy_available: bool,
+) -> Option<HierarchyLoadRequest> {
+    let selected = app.selected?;
+    with_stable_node_position(app, selected, |app| {
+        app.toggle_selected_branch(direction, hierarchy_available)
+    })
+}
+
+fn with_stable_node_position<T>(
+    app: &mut App,
+    node_id: NodeId,
+    mutation: impl FnOnce(&mut App) -> T,
+) -> T {
+    let before = node_world_anchor(app, node_id);
+    let result = mutation(app);
+    let after = node_world_anchor(app, node_id);
+    if let (Some((before_x, before_y)), Some((after_x, after_y))) = (before, after) {
+        app.pan_viewport(
+            before_x.saturating_sub(after_x),
+            before_y.saturating_sub(after_y),
+        );
+    }
+    result
+}
+
+fn node_world_anchor(app: &App, node_id: NodeId) -> Option<(i32, i32)> {
+    let node_id = app.graph.resolve_id(node_id)?;
+    world_canvas_layout(&app.graph, app.selected)
+        .nodes
+        .into_iter()
+        .find(|placement| placement.node_id == node_id)
+        .map(|placement| {
+            (
+                placement
+                    .slot
+                    .x
+                    .saturating_add(i32::from(placement.slot.width) / 2),
+                placement
+                    .slot
+                    .y
+                    .saturating_add(i32::from(placement.slot.height) / 2),
+            )
+        })
+}
+
+fn current_placement(
+    layout: &[CanvasNodePlacement],
     selected: Option<NodeId>,
-) -> Option<&'a CanvasNodePlacement> {
+) -> Option<&CanvasNodePlacement> {
     selected
         .and_then(|selected| {
             layout
@@ -644,7 +739,7 @@ fn render(frame: &mut Frame, app: &App) {
     let [canvas, footer] = canvas_and_footer(frame.area());
 
     let canvas_block = Block::default()
-        .title(" ctree ")
+        .title(" cgraph ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let canvas_inner = canvas_block.inner(canvas);
@@ -672,11 +767,13 @@ fn render(frame: &mut Frame, app: &App) {
                 .graph
                 .node(placement.node_id)
                 .expect("canvas layout only contains existing nodes");
-            render_node(
-                frame,
-                node,
-                placement,
-                app.selected == Some(placement.node_id),
+            frame.render_widget(
+                CanvasNodeWidget {
+                    node,
+                    placement,
+                    selected: app.selected == Some(placement.node_id),
+                },
+                canvas_inner,
             );
         }
     }
@@ -691,79 +788,23 @@ fn render(frame: &mut Frame, app: &App) {
     let footer_text = match app.pending_key {
         Some('a') => "a_: c call search / t type search".to_owned(),
         Some('d') => "d_: d unpin anchor / p clear left / n clear right".to_owned(),
+        Some('e') => "e_: c edit project config".to_owned(),
         Some('t') => "t_: l toggle left / r toggle right".to_owned(),
         _ => hierarchy_failure
             .or_else(|| app.canvas_notice.clone())
             .unwrap_or_else(|| {
-                "hjkl: move  drag: pan  tl/tr: toggle  ac/at: add  dd/dp/dn: delete  q/Esc: quit"
-                    .to_owned()
+                "?: help  ac/at: add  tl/tr: expand  hjkl: move  q: quit".to_owned()
             }),
     };
     render_footer(frame, footer, footer_text, &app.analysis_status);
 
-    if let Some(search) = &app.search {
-        render_search(frame, search);
+    if let Some(help_state) = &app.help {
+        help::render(frame, help_state);
+    } else if let Some(search) = &app.search {
+        search::render(frame, search);
+    } else if let Some(save_state) = &app.save {
+        save::render(frame, save_state);
     }
-}
-
-fn render_node(
-    frame: &mut Frame,
-    node: &GraphNode,
-    placement: CanvasNodePlacement,
-    selected: bool,
-) {
-    let border_style = if selected {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-    let content_style = if selected {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    frame.render_widget(
-        Paragraph::new(node.symbol.as_str())
-            .alignment(Alignment::Center)
-            .style(content_style)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style),
-            ),
-        placement.area,
-    );
-
-    render_branch_button(
-        frame,
-        placement.incoming_button,
-        &node.incoming,
-        Color::Blue,
-    );
-    render_branch_button(
-        frame,
-        placement.outgoing_button,
-        &node.outgoing,
-        Color::Blue,
-    );
-}
-
-fn render_branch_button(frame: &mut Frame, area: Rect, branch: &GraphBranch, color: Color) {
-    let (label, style) = match branch.load_state {
-        LoadState::NotLoaded if branch.neighbors.is_empty() => {
-            ("[+]", Style::default().fg(Color::Yellow))
-        }
-        LoadState::Loading => ("[~]", Style::default().fg(Color::Yellow)),
-        LoadState::Failed => ("[!]", Style::default().fg(Color::Red)),
-        LoadState::Loaded if branch.neighbors.is_empty() => {
-            (" · ", Style::default().fg(Color::DarkGray))
-        }
-        _ if branch.expanded => ("[-]", Style::default().fg(color)),
-        _ => ("[+]", Style::default().fg(color)),
-    };
-    frame.render_widget(Paragraph::new(label).style(style), area);
 }
 
 fn canvas_and_footer(screen: Rect) -> [Rect; 2] {
@@ -834,100 +875,6 @@ fn analysis_status_line(status: &AnalysisStatus) -> Line<'static> {
     Line::from(content)
 }
 
-fn render_search(frame: &mut Frame, search: &SearchState) {
-    let area = search_modal_area(frame.area());
-    frame.render_widget(Clear, area);
-
-    let title = match search.kind {
-        SearchKind::Call => " Add call node ",
-        SearchKind::Type => " Add type node ",
-    };
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    frame.render_widget(block, area);
-
-    let (input_area, status_area, list_area) = search_layout(frame.area());
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan)),
-            Span::raw(&search.input),
-        ])),
-        input_area,
-    );
-
-    let (status, status_style) = match &search.status {
-        SearchStatus::Debouncing => (
-            "Waiting for typing pause…".to_owned(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        SearchStatus::Loading => (
-            "Searching workspace symbols…".to_owned(),
-            Style::default().fg(Color::Yellow),
-        ),
-        SearchStatus::Ready if search.items.is_empty() => (
-            "No matching symbols".to_owned(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        SearchStatus::Ready => (
-            format!("{} symbols", search.items.len()),
-            Style::default().fg(Color::Green),
-        ),
-        SearchStatus::Error(error) => (error.clone(), Style::default().fg(Color::Red)),
-    };
-    frame.render_widget(Paragraph::new(status).style(status_style), status_area);
-
-    let items = search.items.iter().map(|item| {
-        let container = item
-            .container_name
-            .as_deref()
-            .filter(|_| !item.name.contains("::"))
-            .map(|name| format!("  [{name}]"))
-            .unwrap_or_default();
-        ListItem::new(Line::from(vec![
-            Span::styled(&item.name, Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(container, Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!("  {}", item.location),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]))
-    });
-    let list = List::new(items)
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    let mut list_state = ListState::default().with_selected(search.selected);
-    frame.render_stateful_widget(list, list_area, &mut list_state);
-}
-
-fn search_modal_area(screen: Rect) -> Rect {
-    let width = screen.width.saturating_sub(2).min(100);
-    let height = screen.height.saturating_sub(2).min(16);
-    Rect::new(
-        screen.x + screen.width.saturating_sub(width) / 2,
-        screen.y + u16::from(screen.height > height),
-        width,
-        height,
-    )
-}
-
-fn search_layout(screen: Rect) -> (Rect, Rect, Rect) {
-    let area = search_modal_area(screen);
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    let [input, status, list] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(inner);
-    (input, status, list)
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -938,15 +885,22 @@ mod tests {
     use tower_lsp::lsp_types::{SymbolKind, Url};
 
     use super::{
-        CanvasDragState, EdgeVisualKind, InteractionRequest, NavigationDirection, apply_lsp_status,
-        canvas_inner_area, canvas_layout, handle_canvas_key, handle_canvas_mouse,
-        move_canvas_selection, placement_bounds, rect_center, render, search_item,
-        symbol_matches_search, world_canvas_layout, world_rects_overlap,
+        CanvasDragState, EdgeVisualKind, InteractionRequest, NavigationDirection,
+        apply_ipc_command, apply_lsp_status, canvas_inner_area, canvas_layout, handle_canvas_key,
+        handle_canvas_mouse, move_canvas_selection, placement_bounds, rect_center, render,
+        search::{search_item, symbol_matches_search},
+        send_open_location, with_stable_node_position, world_canvas_layout, world_rects_overlap,
     };
     use crate::{
         app::{AnalysisBackend, AnalysisPhase, App, SearchKind},
         cli::Cli,
-        fetch::lsp::{LspStatusUpdate, WorkspaceSymbolMatch},
+        fetch::{
+            CachePolicy, FetchSource, HierarchyResponse, WorkspaceSymbolMatch, lsp::LspStatusUpdate,
+        },
+        ipc::{
+            IpcCommand,
+            protocol::{Envelope, IpcRequest, IpcResponse},
+        },
         state::{HierarchyDirection, HierarchyKind, LoadState, SourceLocation, SymbolIdentity},
     };
 
@@ -963,7 +917,7 @@ mod tests {
             SymbolKind::FUNCTION
         ));
         let method = search_item(WorkspaceSymbolMatch {
-            name: "run".to_owned(),
+            name: "App::run".to_owned(),
             kind: SymbolKind::METHOD,
             container_name: Some("App".to_owned()),
             uri: Url::parse("file:///workspace/src/main.rs").unwrap(),
@@ -973,8 +927,50 @@ mod tests {
     }
 
     #[test]
+    fn ipc_focus_commands_mutate_app_and_return_matching_responses() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let request = IpcRequest::FocusSymbol {
+            hierarchy: HierarchyKind::Call,
+            symbol: "main".to_owned(),
+            location: Some(SourceLocation {
+                uri: "file:///workspace/src/main.rs".to_owned(),
+                line: Some(4),
+                character: Some(2),
+            }),
+        };
+        let (command, mut responses) = IpcCommand::test_command(17, request);
+
+        apply_ipc_command(&mut app, command);
+
+        let selected = app.selected.unwrap();
+        assert_eq!(app.graph.node(selected).unwrap().symbol, "main");
+        assert!(app.graph.is_anchor(selected));
+        let response: Envelope<IpcResponse> =
+            serde_json::from_slice(&responses.try_recv().unwrap()).unwrap();
+        assert_eq!(response.request_id, Some(17));
+        assert_eq!(response.payload, IpcResponse::Accepted);
+
+        let (command, mut responses) = IpcCommand::test_command(
+            18,
+            IpcRequest::FocusSymbol {
+                hierarchy: HierarchyKind::Type,
+                symbol: String::new(),
+                location: None,
+            },
+        );
+        apply_ipc_command(&mut app, command);
+        let response: Envelope<IpcResponse> =
+            serde_json::from_slice(&responses.try_recv().unwrap()).unwrap();
+        assert_eq!(response.request_id, Some(18));
+        let IpcResponse::Error { message } = response.payload else {
+            panic!("invalid focus request must return an error");
+        };
+        assert!(message.contains("symbol must not be empty"));
+    }
+
+    #[test]
     fn maps_lsp_progress_without_losing_server_identity() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         app.set_analysis_status(crate::app::AnalysisStatus::lsp(
             "rust-analyzer",
             AnalysisPhase::Ready,
@@ -1003,7 +999,7 @@ mod tests {
 
     #[test]
     fn footer_places_shortcuts_and_analysis_status_on_the_same_bottom_row() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         app.set_analysis_status(crate::app::AnalysisStatus {
             backend: AnalysisBackend::Lsp("rust-analyzer".to_owned()),
             phase: AnalysisPhase::Working,
@@ -1030,6 +1026,9 @@ mod tests {
         let shortcuts = bottom_row.find("hjkl: move").unwrap();
         let status = bottom_row.find("LSP: rust-analyzer").unwrap();
         assert!(shortcuts < status);
+        assert!(bottom_row.contains("?: help"));
+        assert!(!bottom_row.contains("w: save"));
+        assert!(!bottom_row.contains("dd/dp/dn"));
         assert!(bottom_row.contains("Working 68%"));
         for y in 0..height - 1 {
             let row = (0..width).fold(String::new(), |mut row, x| {
@@ -1042,7 +1041,7 @@ mod tests {
 
     #[test]
     fn delete_prefix_requires_a_complete_valid_command() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree", "call", "root"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
 
         handle_canvas_key(
             &mut app,
@@ -1076,8 +1075,66 @@ mod tests {
     }
 
     #[test]
+    fn ec_requires_the_complete_prefix_command() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let screen = Rect::new(0, 0, 100, 24);
+
+        assert!(
+            handle_canvas_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                true,
+                screen,
+            )
+            .is_none()
+        );
+        assert_eq!(app.pending_key, Some('e'));
+        assert!(
+            handle_canvas_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                true,
+                screen,
+            )
+            .is_none()
+        );
+        handle_canvas_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            true,
+            screen,
+        );
+        assert!(matches!(
+            handle_canvas_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                true,
+                screen,
+            ),
+            Some(InteractionRequest::EditConfig)
+        ));
+        assert_eq!(app.pending_key, None);
+    }
+
+    #[test]
+    fn w_opens_an_empty_save_modal_without_quitting() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
+
+        let request = handle_canvas_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+            false,
+            Rect::new(0, 0, 100, 24),
+        );
+
+        assert!(request.is_none());
+        assert_eq!(app.save.as_ref().unwrap().input, "");
+        assert!(!app.should_quit);
+    }
+
+    #[test]
     fn lays_out_multiple_anchors_with_the_selection_at_the_center() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         pin(&mut app, "first", HierarchyKind::Call);
         let selected = pin(&mut app, "selected", HierarchyKind::Type);
         pin(&mut app, "third", HierarchyKind::Call);
@@ -1101,8 +1158,24 @@ mod tests {
     }
 
     #[test]
+    fn selection_changes_only_translate_the_stable_world_layout() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let first = pin(&mut app, "first", HierarchyKind::Call);
+        let second = pin(&mut app, "second", HierarchyKind::Call);
+        let third = pin(&mut app, "third", HierarchyKind::Call);
+
+        let first_selected = world_canvas_layout(&app.graph, Some(first));
+        let second_selected = world_canvas_layout(&app.graph, Some(second));
+        for (left, right) in [(first, second), (first, third), (second, third)] {
+            let first_delta = world_delta(&first_selected, left, right);
+            let second_delta = world_delta(&second_selected, left, right);
+            assert_eq!(first_delta, second_delta);
+        }
+    }
+
+    #[test]
     fn tl_and_tr_toggle_only_the_requested_side() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root = pin(&mut app, "root", HierarchyKind::Call);
         connect(&mut app, root, HierarchyDirection::Incoming, &["caller"]);
         connect(&mut app, root, HierarchyDirection::Outgoing, &["callee"]);
@@ -1127,7 +1200,7 @@ mod tests {
 
     #[test]
     fn first_tl_schedules_only_the_left_branch_query() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree", "call", "root"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
         let screen = Rect::new(0, 0, 100, 24);
         handle_canvas_key(
             &mut app,
@@ -1142,8 +1215,11 @@ mod tests {
             screen,
         );
 
-        let Some(InteractionRequest::Hierarchy(request)) = request else {
+        let Some(InteractionRequest::Hierarchy(requests)) = request else {
             panic!("first tl must schedule a hierarchy request");
+        };
+        let [request] = requests.as_slice() else {
+            panic!("first tl must schedule exactly one hierarchy request");
         };
         let root = app.selected.unwrap();
         assert_eq!(request.query.direction, HierarchyDirection::Incoming);
@@ -1158,8 +1234,45 @@ mod tests {
     }
 
     #[test]
+    fn r_schedules_refreshes_for_both_branches() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
+        let request = handle_canvas_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            true,
+            Rect::new(0, 0, 100, 24),
+        );
+
+        let Some(InteractionRequest::Hierarchy(requests)) = request else {
+            panic!("r must schedule hierarchy refresh requests");
+        };
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.cache_policy == CachePolicy::Refresh)
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.query.direction)
+                .collect::<Vec<_>>(),
+            [HierarchyDirection::Incoming, HierarchyDirection::Outgoing]
+        );
+        let root = app.selected.unwrap();
+        assert_eq!(
+            app.graph.node(root).unwrap().incoming.load_state,
+            LoadState::Loading
+        );
+        assert_eq!(
+            app.graph.node(root).unwrap().outgoing.load_state,
+            LoadState::Loading
+        );
+    }
+
+    #[test]
     fn canvas_layout_only_contains_children_of_expanded_branches() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root_id = pin(&mut app, "root", HierarchyKind::Call);
         let child_id = connect(&mut app, root_id, HierarchyDirection::Incoming, &["caller"])[0];
         let area = Rect::new(0, 0, 100, 20);
@@ -1180,7 +1293,7 @@ mod tests {
 
     #[test]
     fn expanded_node_rectangles_never_overlap() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root = pin(&mut app, "root", HierarchyKind::Call);
         let mut callers = Vec::new();
         let mut callees = Vec::new();
@@ -1214,7 +1327,7 @@ mod tests {
 
     #[test]
     fn visible_parent_child_relationship_renders_a_connector() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root_id = pin(&mut app, "root", HierarchyKind::Call);
         let child_id = connect(&mut app, root_id, HierarchyDirection::Outgoing, &["child"])[0];
         app.graph.node_mut(root_id).unwrap().outgoing.expanded = true;
@@ -1230,6 +1343,10 @@ mod tests {
         assert_eq!(layout.edges.len(), 1);
         assert_eq!(layout.edges[0].source_id, root_id);
         assert_eq!(layout.edges[0].target_id, child_id);
+        assert!(
+            layout.edges[0].cells.iter().any(|cell| cell.symbol == '▶'),
+            "forward connections must show their direction before the target"
+        );
         let connector = layout.edges[0]
             .cells
             .iter()
@@ -1257,7 +1374,7 @@ mod tests {
     #[test]
     fn node_box_does_not_render_call_or_type_corner_labels() {
         let app = App::from_cli(
-            Cli::try_parse_from(["ctree", "call", "VeryLongClassName::very_long_method_name"])
+            Cli::try_parse_from(["cgraph", "call", "VeryLongClassName::very_long_method_name"])
                 .unwrap(),
         );
         let screen = Rect::new(0, 0, 80, 16);
@@ -1289,8 +1406,96 @@ mod tests {
     }
 
     #[test]
+    fn partially_visible_node_renders_a_true_slice_until_fully_offscreen() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
+        let screen = Rect::new(0, 0, 40, 12);
+        let canvas = canvas_inner_area(screen);
+        let initial = canvas_layout(canvas, &app.graph, app.selected, app.viewport);
+        let initial_slot = initial.nodes[0].slot;
+        let desired_x = i64::from(canvas.x).saturating_sub(5);
+        app.viewport.offset_x = i32::try_from(desired_x.saturating_sub(initial_slot.x)).unwrap();
+
+        let clipped = canvas_layout(canvas, &app.graph, app.selected, app.viewport);
+        let placement = clipped.nodes[0];
+        assert!(placement.visible_slot.width < placement.slot.width);
+        assert_eq!(placement.visible_slot.x, canvas.x);
+
+        let backend = TestBackend::new(screen.width, screen.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((canvas.x, placement.area.y))
+                .unwrap()
+                .symbol(),
+            "─",
+            "the viewport boundary must not be rendered as a synthetic left border"
+        );
+
+        app.viewport.offset_x = app.viewport.offset_x.saturating_sub(1000);
+        assert!(
+            canvas_layout(canvas, &app.graph, app.selected, app.viewport)
+                .nodes
+                .is_empty(),
+            "a node should disappear only after it no longer intersects the viewport"
+        );
+    }
+
+    #[test]
+    fn connection_remains_visible_when_its_target_box_is_offscreen() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let root_id = pin(&mut app, "root", HierarchyKind::Call);
+        let child_id = connect(&mut app, root_id, HierarchyDirection::Outgoing, &["child"])[0];
+        app.graph.node_mut(root_id).unwrap().outgoing.expanded = true;
+        app.selected = Some(root_id);
+        let screen = Rect::new(0, 0, 38, 12);
+        let canvas = canvas_inner_area(screen);
+        let layout = canvas_layout(canvas, &app.graph, app.selected, app.viewport);
+
+        assert!(
+            layout
+                .nodes
+                .iter()
+                .any(|placement| placement.node_id == root_id)
+        );
+        assert!(
+            !layout
+                .nodes
+                .iter()
+                .any(|placement| placement.node_id == child_id),
+            "the fixture requires the target box to be completely offscreen"
+        );
+        let edge = layout
+            .edges
+            .iter()
+            .find(|edge| edge.source_id == root_id && edge.target_id == child_id)
+            .expect("an edge crossing the viewport must survive endpoint clipping");
+        let continuation = edge
+            .cells
+            .iter()
+            .find(|cell| cell.symbol == '▶')
+            .expect("the offscreen target direction remains visible at the boundary");
+        assert_eq!(continuation.x, canvas.right() - 1);
+
+        let backend = TestBackend::new(screen.width, screen.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((continuation.x, continuation.y))
+                .unwrap()
+                .symbol(),
+            "▶"
+        );
+    }
+
+    #[test]
     fn canvas_mouse_selects_nodes_and_toggles_side_buttons_independently() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let first_id = pin(&mut app, "first", HierarchyKind::Call);
         let second_id = pin(&mut app, "second", HierarchyKind::Call);
         connect(
@@ -1327,13 +1532,38 @@ mod tests {
         );
         assert_eq!(app.selected, Some(second_id));
 
-        let layout = canvas_layout(
+        let after_selection = canvas_layout(
             canvas_inner_area(screen),
             &app.graph,
             app.selected,
             app.viewport,
         );
-        let second_placement = *layout
+        let second_after_selection = *after_selection
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == second_id)
+            .unwrap();
+        assert_eq!(second_after_selection.slot, second_placement.slot);
+
+        let first_placement = *after_selection
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == first_id)
+            .unwrap();
+        click(
+            &mut app,
+            screen,
+            first_placement.area.x + 1,
+            first_placement.area.y + 1,
+        );
+        assert_eq!(app.selected, Some(first_id));
+        let before_incoming_toggle = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        );
+        let second_placement = *before_incoming_toggle
             .nodes
             .iter()
             .find(|placement| placement.node_id == second_id)
@@ -1344,22 +1574,50 @@ mod tests {
             second_placement.incoming_button.x + 1,
             second_placement.incoming_button.y,
         );
+        assert_eq!(app.selected, Some(second_id));
         assert!(app.graph.node(second_id).unwrap().incoming.expanded);
         assert!(!app.graph.node(second_id).unwrap().outgoing.expanded);
+        let after_incoming_toggle = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        );
+        let second_after_incoming_toggle = *after_incoming_toggle
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == second_id)
+            .unwrap();
+        assert_eq!(second_after_incoming_toggle.slot, second_placement.slot);
 
         click(
             &mut app,
             screen,
-            second_placement.outgoing_button.x + 1,
-            second_placement.outgoing_button.y,
+            second_after_incoming_toggle.outgoing_button.x + 1,
+            second_after_incoming_toggle.outgoing_button.y,
         );
         assert!(app.graph.node(second_id).unwrap().incoming.expanded);
         assert!(app.graph.node(second_id).unwrap().outgoing.expanded);
+        let after_outgoing_toggle = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        );
+        assert_eq!(
+            after_outgoing_toggle
+                .nodes
+                .iter()
+                .find(|placement| placement.node_id == second_id)
+                .unwrap()
+                .slot,
+            second_after_incoming_toggle.slot
+        );
     }
 
     #[test]
     fn first_mouse_side_button_schedules_its_branch_query() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree", "type", "Root"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "type", "Root"]).unwrap());
         let screen = Rect::new(0, 0, 100, 24);
         let placement = canvas_layout(
             canvas_inner_area(screen),
@@ -1382,8 +1640,11 @@ mod tests {
             &mut drag,
         );
 
-        let Some(InteractionRequest::Hierarchy(request)) = request else {
+        let Some(InteractionRequest::Hierarchy(requests)) = request else {
             panic!("first side-button click must schedule hierarchy loading");
+        };
+        let [request] = requests.as_slice() else {
+            panic!("first side-button click must schedule exactly one hierarchy request");
         };
         let root = app.selected.unwrap();
         assert_eq!(request.query.direction, HierarchyDirection::Outgoing);
@@ -1399,8 +1660,104 @@ mod tests {
     }
 
     #[test]
+    fn double_clicking_a_node_opens_only_an_exact_source_location() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let node_id = pin(&mut app, "main", HierarchyKind::Call);
+        app.selected = Some(node_id);
+        let expected = app.graph.node(node_id).unwrap().location.clone().unwrap();
+        let screen = Rect::new(0, 0, 100, 24);
+        let placement = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        )
+        .nodes[0];
+        let column = placement.area.x + 1;
+        let row = placement.area.y + 1;
+        let mut pointer = CanvasDragState::default();
+
+        assert!(complete_click(&mut app, screen, &mut pointer, column, row).is_none());
+        let second = complete_click(&mut app, screen, &mut pointer, column, row);
+        let Some(InteractionRequest::OpenLocation(location)) = second else {
+            panic!("double-click must emit the node's exact source location");
+        };
+        assert_eq!(location, expected);
+        send_open_location(&mut app, None, &expected);
+        assert_eq!(
+            app.canvas_notice.as_deref(),
+            Some("IPC is not enabled; start cgraph with --ipc-socket <PATH>")
+        );
+
+        let mut provisional =
+            App::from_cli(Cli::try_parse_from(["cgraph", "call", "unresolved"]).unwrap());
+        let placement = canvas_layout(
+            canvas_inner_area(screen),
+            &provisional.graph,
+            provisional.selected,
+            provisional.viewport,
+        )
+        .nodes[0];
+        let mut pointer = CanvasDragState::default();
+        let column = placement.area.x + 1;
+        let row = placement.area.y + 1;
+        assert!(complete_click(&mut provisional, screen, &mut pointer, column, row).is_none());
+        assert!(complete_click(&mut provisional, screen, &mut pointer, column, row).is_none());
+        assert_eq!(
+            provisional.canvas_notice.as_deref(),
+            Some("Selected node has no exact source location")
+        );
+    }
+
+    #[test]
+    fn hierarchy_completion_keeps_the_queried_node_center_stable() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "temporary"]).unwrap());
+        let screen = Rect::new(0, 0, 100, 24);
+        let request = app
+            .toggle_selected_branch(HierarchyDirection::Outgoing, true)
+            .unwrap();
+        let before = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        )
+        .nodes[0]
+            .slot;
+        let mut resolved_query = request.query.clone();
+        resolved_query.symbol = identity(
+            "VeryLongResolvedType::very_long_resolved_method",
+            HierarchyKind::Call,
+        );
+
+        assert!(with_stable_node_position(
+            &mut app,
+            request.node_id,
+            |app| app.finish_hierarchy(
+                &request,
+                Ok(HierarchyResponse {
+                    query: resolved_query,
+                    children: Vec::new(),
+                    source: FetchSource::Lsp,
+                }),
+            )
+        ));
+
+        let after = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        )
+        .nodes[0]
+            .slot;
+        assert_eq!(projected_center(after), projected_center(before));
+        assert!(after.width > before.width);
+    }
+
+    #[test]
     fn dragging_canvas_or_node_pans_viewport_and_reveals_offscreen_nodes() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root_id = pin(&mut app, "root", HierarchyKind::Call);
         let child_id = connect(&mut app, root_id, HierarchyDirection::Outgoing, &["child"])[0];
         app.graph.node_mut(root_id).unwrap().outgoing.expanded = true;
@@ -1415,12 +1772,12 @@ mod tests {
                 .iter()
                 .any(|placement| placement.node_id == root_id)
         );
-        assert!(
-            !initial
-                .nodes
-                .iter()
-                .any(|placement| placement.node_id == child_id)
-        );
+        let initial_child = initial
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == child_id)
+            .expect("the intersecting part of the child must remain visible");
+        assert!(initial_child.visible_slot.width < initial_child.slot.width);
 
         let root_placement = initial
             .nodes
@@ -1456,11 +1813,14 @@ mod tests {
         assert_eq!(app.viewport.offset_x, -20);
         assert_eq!(world_canvas_layout(&app.graph, app.selected), world_before);
         let after_node_drag = canvas_layout(canvas, &app.graph, app.selected, app.viewport);
-        assert!(
-            after_node_drag
-                .nodes
-                .iter()
-                .any(|placement| placement.node_id == child_id)
+        let child_after_node_drag = after_node_drag
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == child_id)
+            .unwrap();
+        assert_eq!(
+            child_after_node_drag.visible_slot.width,
+            child_after_node_drag.slot.width
         );
 
         app.viewport = Default::default();
@@ -1492,11 +1852,14 @@ mod tests {
         assert_eq!(app.viewport.offset_x, -20);
         assert_eq!(world_canvas_layout(&app.graph, app.selected), world_before);
         let after_background_drag = canvas_layout(canvas, &app.graph, app.selected, app.viewport);
-        assert!(
-            after_background_drag
-                .nodes
-                .iter()
-                .any(|placement| placement.node_id == child_id)
+        let child_after_background_drag = after_background_drag
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == child_id)
+            .unwrap();
+        assert_eq!(
+            child_after_background_drag.visible_slot.width,
+            child_after_background_drag.slot.width
         );
         assert_eq!(
             app.graph.node(root_id).unwrap().outgoing.neighbors[0],
@@ -1506,7 +1869,7 @@ mod tests {
 
     #[test]
     fn keyboard_navigation_uses_visible_node_geometry() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root_id = pin(&mut app, "root", HierarchyKind::Call);
         let incoming_id = connect(&mut app, root_id, HierarchyDirection::Incoming, &["caller"])[0];
         let outgoing_id = connect(&mut app, root_id, HierarchyDirection::Outgoing, &["callee"])[0];
@@ -1515,8 +1878,32 @@ mod tests {
         app.selected = Some(root_id);
         let screen = Rect::new(0, 0, 100, 24);
 
+        let before_navigation = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        );
+        let outgoing_before_selection = before_navigation
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == outgoing_id)
+            .unwrap()
+            .slot;
         navigate(&mut app, screen, KeyCode::Right);
         assert_eq!(app.selected, Some(outgoing_id));
+        let outgoing_after_selection = canvas_layout(
+            canvas_inner_area(screen),
+            &app.graph,
+            app.selected,
+            app.viewport,
+        )
+        .nodes
+        .into_iter()
+        .find(|placement| placement.node_id == outgoing_id)
+        .unwrap()
+        .slot;
+        assert_eq!(outgoing_after_selection, outgoing_before_selection);
         navigate(&mut app, screen, KeyCode::Char('h'));
         assert_eq!(app.selected, Some(root_id));
         navigate(&mut app, screen, KeyCode::Left);
@@ -1572,7 +1959,7 @@ mod tests {
 
     #[test]
     fn diamond_layout_uses_one_shared_node_and_keeps_all_edges() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root = pin(&mut app, "root", HierarchyKind::Call);
         let branches = connect(
             &mut app,
@@ -1612,7 +1999,7 @@ mod tests {
 
     #[test]
     fn cycle_edges_use_the_special_double_line_style() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let first = pin(&mut app, "first", HierarchyKind::Call);
         let second = connect(&mut app, first, HierarchyDirection::Outgoing, &["second"])[0];
         let third = connect(&mut app, second, HierarchyDirection::Outgoing, &["third"])[0];
@@ -1646,7 +2033,7 @@ mod tests {
 
     #[test]
     fn self_loop_is_rendered_as_a_special_loop() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let recursive = pin(&mut app, "recursive", HierarchyKind::Call);
         connect(
             &mut app,
@@ -1701,6 +2088,29 @@ mod tests {
         );
     }
 
+    fn complete_click(
+        app: &mut App,
+        screen: Rect,
+        pointer: &mut CanvasDragState,
+        column: u16,
+        row: u16,
+    ) -> Option<InteractionRequest> {
+        handle_canvas_mouse(
+            app,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), column, row),
+            false,
+            screen,
+            pointer,
+        );
+        handle_canvas_mouse(
+            app,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), column, row),
+            false,
+            screen,
+            pointer,
+        )
+    }
+
     fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
@@ -1753,5 +2163,32 @@ mod tests {
                 character: Some(0),
             }),
         }
+    }
+
+    fn world_delta(
+        layout: &crate::tui::canvas::WorldLayoutSnapshot,
+        from: crate::state::NodeId,
+        to: crate::state::NodeId,
+    ) -> (i32, i32) {
+        let from = layout
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == from)
+            .unwrap()
+            .slot;
+        let to = layout
+            .nodes
+            .iter()
+            .find(|placement| placement.node_id == to)
+            .unwrap()
+            .slot;
+        (to.x - from.x, to.y - from.y)
+    }
+
+    fn projected_center(slot: crate::tui::canvas::ProjectedRect) -> (i64, i64) {
+        (
+            slot.x + i64::from(slot.width) / 2,
+            slot.y + i64::from(slot.height) / 2,
+        )
     }
 }

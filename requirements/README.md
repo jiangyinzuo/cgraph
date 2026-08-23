@@ -1,4 +1,4 @@
-# ctree 需求管理
+# cgraph 需求管理
 
 本目录是用户可观察产品行为的唯一规范来源。根目录 `DESIGN.md` 只保留产品愿景、范围和需求导航；`docs/` 解释已经交付的用户用法；`src/` 记录实现原理与技术决策。
 
@@ -41,13 +41,13 @@
 | --- | --- | --- | ---: | --- |
 | [REQ-1 会话与启动](REQ-1-session/README.md) | `Implemented` | `P0` | 2 | 启动模式、初始图入口和安全退出 |
 | [REQ-2 分析后端状态](REQ-2-analysis-status/README.md) | `Implemented` | `P0` | 3 | LSP/Tree-sitter 状态及底部同栏展示 |
-| [REQ-3 层次关系探索](REQ-3-hierarchy/README.md) | `Partial` | `P1` | 4 | 双向展开、缓存、重复节点和刷新 |
-| [REQ-4 画布与导航](REQ-4-canvas-navigation/README.md) | `Implemented` | `P1` | 3 | 选中、空间导航、无限画布与有向图布局 |
+| [REQ-3 层次关系探索](REQ-3-hierarchy/README.md) | `Implemented` | `P1` | 4 | 双向展开、缓存、重复节点和刷新 |
+| [REQ-4 画布与导航](REQ-4-canvas-navigation/README.md) | `Implemented` | `P1` | 5 | 选中、空间导航、无限画布、图布局、连线与操作帮助 |
 | [REQ-5 符号与图入口管理](REQ-5-symbol-management/README.md) | `Implemented` | `P0` | 5 | 搜索、新增、重定位与取消图入口 |
-| [REQ-6 进程间通信](REQ-6-ipc/README.md) | `Planned` | `P2` | 2 | 编辑器跳转和外部查询 |
-| [REQ-7 导出关系图](REQ-7-export/README.md) | `Planned` | `P2` | 0 | 不覆盖已有文件的文本导出 |
-| [REQ-8 语言支持](REQ-8-language-support/README.md) | `Partial` | `P1` | 0 | Rust、C/C++ 和 Python 后端支持 |
-| [REQ-9 项目本地配置与符号过滤](REQ-9-project-configuration/README.md) | `Implemented` | `P1` | 0 | `.ctree.toml`、限定方法名和通配过滤 |
+| [REQ-6 进程间通信](REQ-6-ipc/README.md) | `Implemented` | `P2` | 2 | 节点跳转编辑器与外部 anchor 聚焦 |
+| [REQ-7 导出关系图](REQ-7-export/README.md) | `Implemented` | `P2` | 0 | 简洁、稳定且不覆盖已有文件的文本导出 |
+| [REQ-8 语言支持](REQ-8-language-support/README.md) | `Implemented` | `P1` | 0 | Rust、C/C++ 和 Python 后端支持 |
+| [REQ-9 项目本地配置与符号过滤](REQ-9-project-configuration/README.md) | `Implemented` | `P1` | 2 | `.cgraph.toml`、限定名过滤和会话内编辑重载 |
 
 `Partial` 只用于已经存在部分用户可观察行为的需求。领域类型、协议结构或占位类等内部骨架应记录为实现准备，但不能据此把 `Planned` 改成 `Partial`。
 

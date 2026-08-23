@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
-use ctree::fetch::lsp::{LspConfig, LspProvider};
+use cgraph::fetch::lsp::{LspConfig, LspProvider};
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -6,15 +6,22 @@
 use crate::{
     cli::{Cli, Command},
     config::SymbolFilter,
-    fetch::{HierarchyQuery, HierarchyResponse},
+    fetch::{CachePolicy, FetchSource, HierarchyQuery, HierarchyResponse},
     state::{
         HierarchyDirection, HierarchyKind, NodeId, SourceLocation, SymbolIdentity, Viewport,
         graph::RelationGraph,
     },
 };
 
+use std::path::PathBuf;
+
+mod config;
+mod help;
+mod save;
 mod search;
 
+pub use help::HelpState;
+pub use save::{SaveState, SaveStatus};
 use search::refresh_search_items;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,7 +123,7 @@ pub struct SearchState {
     pub status: SearchStatus,
     candidates: Vec<SearchItem>,
     request_id: u64,
-    lsp_available: bool,
+    provider_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,20 +138,25 @@ pub struct HierarchyLoadRequest {
     pub request_id: u64,
     pub node_id: NodeId,
     pub query: HierarchyQuery,
+    pub cache_policy: CachePolicy,
+    previous_load_state: crate::state::LoadState,
 }
 
 #[derive(Debug)]
 pub struct App {
     pub should_quit: bool,
+    pub workspace: PathBuf,
     pub graph: RelationGraph,
     pub selected: Option<NodeId>,
     pub pending_key: Option<char>,
     pub search: Option<SearchState>,
+    pub save: Option<SaveState>,
+    pub help: Option<HelpState>,
     pub analysis_status: AnalysisStatus,
     pub viewport: Viewport,
     pub canvas_notice: Option<String>,
     symbol_filter: SymbolFilter,
-    lsp_error: Option<String>,
+    analysis_error: Option<String>,
     next_search_request_id: u64,
     next_hierarchy_request_id: u64,
 }
@@ -152,6 +164,7 @@ pub struct App {
 impl App {
     pub fn from_cli(cli: Cli) -> Self {
         let mut graph = RelationGraph::default();
+        let workspace = cli.workspace.clone();
         let selected = cli.command.map(|command| {
             let (symbol, kind) = match command {
                 Command::Call { symbol } => (symbol, HierarchyKind::Call),
@@ -166,15 +179,18 @@ impl App {
 
         Self {
             should_quit: false,
+            workspace,
             graph,
             selected,
             pending_key: None,
             search: None,
+            save: None,
+            help: None,
             analysis_status: AnalysisStatus::inactive("No analysis backend"),
             viewport: Viewport::default(),
             canvas_notice: None,
             symbol_filter: SymbolFilter::default(),
-            lsp_error: None,
+            analysis_error: None,
             next_search_request_id: 1,
             next_hierarchy_request_id: 1,
         }
@@ -184,8 +200,8 @@ impl App {
         self.should_quit = true;
     }
 
-    pub fn set_lsp_error(&mut self, error: impl Into<String>) {
-        self.lsp_error = Some(error.into());
+    pub fn set_analysis_error(&mut self, error: impl Into<String>) {
+        self.analysis_error = Some(error.into());
     }
 
     pub fn set_analysis_status(&mut self, status: AnalysisStatus) {
@@ -197,18 +213,18 @@ impl App {
         self.viewport.offset_y = self.viewport.offset_y.saturating_add(delta_y);
     }
 
-    pub fn set_symbol_filter(&mut self, symbol_filter: SymbolFilter) {
-        self.symbol_filter = symbol_filter;
-    }
-
-    pub fn open_search(&mut self, kind: SearchKind, lsp_available: bool) -> Option<SearchRequest> {
-        let status = if lsp_available {
+    pub fn open_search(
+        &mut self,
+        kind: SearchKind,
+        provider_available: bool,
+    ) -> Option<SearchRequest> {
+        let status = if provider_available {
             SearchStatus::Debouncing
         } else {
             SearchStatus::Error(
-                self.lsp_error
+                self.analysis_error
                     .clone()
-                    .unwrap_or_else(|| "LSP is unavailable; start ctree with --lsp".to_owned()),
+                    .unwrap_or_else(|| "No workspace-symbol provider is available".to_owned()),
             )
         };
         self.pending_key = None;
@@ -220,7 +236,7 @@ impl App {
             status,
             candidates: Vec::new(),
             request_id: 0,
-            lsp_available,
+            provider_available,
         });
 
         self.request_current_search()
@@ -322,6 +338,51 @@ impl App {
         self.close_search();
     }
 
+    pub fn focus_symbol(&mut self, identity: SymbolIdentity) -> Result<NodeId, String> {
+        if identity.symbol.trim().is_empty() {
+            return Err("symbol must not be empty".to_owned());
+        }
+        if let Some(location) = &identity.location
+            && (location
+                .uri
+                .strip_prefix("file://")
+                .is_none_or(str::is_empty)
+                || location.uri.chars().any(char::is_control)
+                || location.line.is_none()
+                || location.character.is_none())
+        {
+            return Err(
+                "location must contain a file URI and exact zero-based line/character".to_owned(),
+            );
+        }
+
+        let node_id = if identity.location.is_some() {
+            self.graph.pin_symbol(identity)
+        } else {
+            match self
+                .graph
+                .nodes_named(&identity.symbol, identity.kind)
+                .as_slice()
+            {
+                [] => self.graph.pin_symbol(identity),
+                [node_id] => {
+                    self.graph.pin(*node_id);
+                    *node_id
+                }
+                _ => {
+                    return Err(format!(
+                        "symbol {:?} is ambiguous; include an exact source location",
+                        identity.symbol
+                    ));
+                }
+            }
+        };
+        self.selected = Some(node_id);
+        self.viewport = Viewport::default();
+        self.canvas_notice = None;
+        Ok(node_id)
+    }
+
     pub fn delete_selected_anchor(&mut self) -> bool {
         let Some(selected) = self.selected else {
             return false;
@@ -394,20 +455,43 @@ impl App {
             return None;
         }
 
-        let request_id = self.next_hierarchy_request_id;
-        self.next_hierarchy_request_id = self.next_hierarchy_request_id.wrapping_add(1);
-        branch.load_state = crate::state::LoadState::Loading;
-        branch.expanded = true;
-        branch.failure = None;
-        branch.active_request_id = Some(request_id);
-        Some(HierarchyLoadRequest {
-            request_id,
-            node_id,
-            query: HierarchyQuery {
-                symbol: identity,
-                direction,
-            },
-        })
+        self.begin_hierarchy_load(node_id, identity, direction, CachePolicy::UseCache, true)
+    }
+
+    pub fn refresh_selected_branches(
+        &mut self,
+        hierarchy_available: bool,
+    ) -> Vec<HierarchyLoadRequest> {
+        let Some(selected) = self
+            .selected
+            .and_then(|node_id| self.graph.resolve_id(node_id))
+        else {
+            return Vec::new();
+        };
+        self.selected = Some(selected);
+        if !hierarchy_available {
+            self.canvas_notice = Some("Refresh requires an available LSP server".to_owned());
+            return Vec::new();
+        }
+
+        self.canvas_notice = None;
+        let identity = self
+            .graph
+            .node(selected)
+            .expect("resolved graph nodes exist")
+            .identity();
+        [HierarchyDirection::Incoming, HierarchyDirection::Outgoing]
+            .into_iter()
+            .filter_map(|direction| {
+                self.begin_hierarchy_load(
+                    selected,
+                    identity.clone(),
+                    direction,
+                    CachePolicy::Refresh,
+                    false,
+                )
+            })
+            .collect()
     }
 
     pub fn finish_hierarchy(
@@ -428,6 +512,7 @@ impl App {
         }
         match result {
             Ok(response) => {
+                let source = response.source;
                 let was_selected = self.selected == Some(node_id);
                 let Some(node_id) = self
                     .graph
@@ -466,6 +551,12 @@ impl App {
                 if branch.neighbors.is_empty() {
                     branch.expanded = false;
                 }
+                if source == FetchSource::TreeSitter {
+                    self.canvas_notice = Some(
+                        "Tree-sitter: syntactic relations only; dynamic dispatch may be omitted"
+                            .to_owned(),
+                    );
+                }
             }
             Err(error) => {
                 let branch = self
@@ -474,17 +565,57 @@ impl App {
                     .expect("resolved graph nodes exist")
                     .branch_mut(request.query.direction);
                 branch.active_request_id = None;
-                branch.load_state = crate::state::LoadState::Failed;
-                branch.expanded = false;
+                if request.cache_policy == CachePolicy::Refresh {
+                    branch.load_state = request.previous_load_state;
+                } else {
+                    branch.load_state = crate::state::LoadState::Failed;
+                    branch.expanded = false;
+                }
                 branch.failure = Some(error);
             }
         }
         true
     }
 
+    fn begin_hierarchy_load(
+        &mut self,
+        node_id: NodeId,
+        identity: SymbolIdentity,
+        direction: HierarchyDirection,
+        cache_policy: CachePolicy,
+        expand: bool,
+    ) -> Option<HierarchyLoadRequest> {
+        let request_id = self.next_hierarchy_request_id;
+        self.next_hierarchy_request_id = self.next_hierarchy_request_id.wrapping_add(1);
+        let branch = self.graph.node_mut(node_id)?.branch_mut(direction);
+        let previous_load_state = match branch.load_state {
+            crate::state::LoadState::Loading if branch.neighbors.is_empty() => {
+                crate::state::LoadState::NotLoaded
+            }
+            crate::state::LoadState::Loading => crate::state::LoadState::Loaded,
+            state => state,
+        };
+        branch.load_state = crate::state::LoadState::Loading;
+        if expand {
+            branch.expanded = true;
+        }
+        branch.failure = None;
+        branch.active_request_id = Some(request_id);
+        Some(HierarchyLoadRequest {
+            request_id,
+            node_id,
+            query: HierarchyQuery {
+                symbol: identity,
+                direction,
+            },
+            cache_policy,
+            previous_load_state,
+        })
+    }
+
     fn request_current_search(&mut self) -> Option<SearchRequest> {
         let search = self.search.as_ref()?;
-        if !search.lsp_available {
+        if !search.provider_available {
             return None;
         }
 
@@ -509,7 +640,7 @@ mod tests {
     use crate::{
         cli::Cli,
         config::SymbolFilter,
-        fetch::{FetchSource, HierarchyResponse},
+        fetch::{CachePolicy, FetchSource, HierarchyResponse},
         state::{
             HierarchyDirection, HierarchyKind, LoadState, NodeId, SourceLocation, SymbolIdentity,
         },
@@ -517,7 +648,7 @@ mod tests {
 
     #[test]
     fn queries_on_open_and_after_each_text_change() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let open_request = app.open_search(SearchKind::Call, true).unwrap();
 
         assert_eq!(open_request.query, "");
@@ -557,7 +688,7 @@ mod tests {
 
     #[test]
     fn ignores_results_from_a_closed_search_session() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let old_request = app.open_search(SearchKind::Call, true).unwrap();
         app.close_search();
         let current_request = app.open_search(SearchKind::Call, true).unwrap();
@@ -571,7 +702,7 @@ mod tests {
 
     #[test]
     fn ranks_exact_prefix_and_subsequence_matches() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         app.open_search(SearchKind::Call, true).unwrap();
         let mut request = None;
         for character in "main".chars() {
@@ -595,7 +726,7 @@ mod tests {
 
     #[test]
     fn matches_remaining_query_parts_against_container_and_path() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         app.open_search(SearchKind::Call, true).unwrap();
         let mut request = None;
         for character in "run service".chars() {
@@ -623,7 +754,7 @@ mod tests {
 
     #[test]
     fn applies_project_symbol_filter_to_search_and_hierarchy_results() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         app.set_symbol_filter(
             SymbolFilter::from_patterns(["*::into", "Option::is_some", "*::Some"]).unwrap(),
         );
@@ -669,7 +800,7 @@ mod tests {
 
     #[test]
     fn accepts_a_result_as_a_deduplicated_anchor() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         app.open_search(SearchKind::Type, true).unwrap();
         app.push_search_char('S').unwrap();
         let request = app.push_search_char('t').unwrap();
@@ -705,8 +836,74 @@ mod tests {
     }
 
     #[test]
+    fn external_focus_reuses_semantic_nodes_and_rejects_ambiguous_names() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let first = identity("run", HierarchyKind::Call);
+        let first_id = app.graph.insert_symbol(first.clone());
+        app.viewport.offset_x = 17;
+
+        assert_eq!(app.focus_symbol(first.clone()).unwrap(), first_id);
+        assert_eq!(app.graph.node_count(), 1);
+        assert_eq!(app.graph.anchors(), [first_id]);
+        assert_eq!(app.selected, Some(first_id));
+        assert_eq!(app.viewport, crate::state::Viewport::default());
+
+        let second = SymbolIdentity {
+            symbol: "run".to_owned(),
+            kind: HierarchyKind::Call,
+            location: Some(SourceLocation {
+                uri: "file:///workspace/src/other.rs".to_owned(),
+                line: Some(3),
+                character: Some(1),
+            }),
+        };
+        app.graph.insert_symbol(second);
+        let error = app
+            .focus_symbol(SymbolIdentity {
+                symbol: "run".to_owned(),
+                kind: HierarchyKind::Call,
+                location: None,
+            })
+            .unwrap_err();
+        assert!(error.contains("ambiguous"));
+        assert_eq!(app.graph.node_count(), 2);
+
+        let created = app
+            .focus_symbol(SymbolIdentity {
+                symbol: "new_type".to_owned(),
+                kind: HierarchyKind::Type,
+                location: None,
+            })
+            .unwrap();
+        assert_eq!(app.graph.node(created).unwrap().symbol, "new_type");
+        assert!(app.graph.is_anchor(created));
+
+        for location in [
+            SourceLocation {
+                uri: "file://".to_owned(),
+                line: Some(0),
+                character: Some(0),
+            },
+            SourceLocation {
+                uri: "file:///workspace/src/main.py".to_owned(),
+                line: Some(0),
+                character: None,
+            },
+        ] {
+            let error = app
+                .focus_symbol(SymbolIdentity {
+                    symbol: "invalid".to_owned(),
+                    kind: HierarchyKind::Call,
+                    location: Some(location),
+                })
+                .unwrap_err();
+            assert!(error.contains("exact zero-based line/character"));
+        }
+    }
+
+    #[test]
     fn only_deletes_selected_anchors_and_selects_a_remaining_anchor() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let first_root = app.graph.pin_symbol(identity("first", HierarchyKind::Call));
         let child_id = app
             .graph
@@ -740,7 +937,7 @@ mod tests {
 
     #[test]
     fn deletes_only_the_selected_nodes_requested_branch() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let selected = app.graph.pin_symbol(identity("root", HierarchyKind::Call));
         app.graph
             .replace_branch_neighbors(
@@ -775,7 +972,7 @@ mod tests {
 
     #[test]
     fn selects_nested_nodes_and_toggles_one_requested_branch() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let root = app.graph.pin_symbol(identity("root", HierarchyKind::Call));
         let child_id = app
             .graph
@@ -807,7 +1004,7 @@ mod tests {
 
     #[test]
     fn lazily_loads_a_branch_once_and_reuses_its_children() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree", "call", "root"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
         let request = app
             .toggle_selected_branch(HierarchyDirection::Outgoing, true)
             .unwrap();
@@ -848,7 +1045,7 @@ mod tests {
 
     #[test]
     fn retries_failed_hierarchy_and_ignores_stale_results() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree", "type", "Root"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "type", "Root"]).unwrap());
         let failed = app
             .toggle_selected_branch(HierarchyDirection::Incoming, true)
             .unwrap();
@@ -892,7 +1089,7 @@ mod tests {
 
     #[test]
     fn keeps_successful_empty_hierarchy_distinct_from_failure() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree", "call", "leaf"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "leaf"]).unwrap());
         let request = app
             .toggle_selected_branch(HierarchyDirection::Outgoing, true)
             .unwrap();
@@ -923,8 +1120,30 @@ mod tests {
     }
 
     #[test]
+    fn tree_sitter_hierarchy_reports_its_syntactic_confidence() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
+        let request = app
+            .toggle_selected_branch(HierarchyDirection::Outgoing, true)
+            .unwrap();
+
+        assert!(app.finish_hierarchy(
+            &request,
+            Ok(HierarchyResponse {
+                query: request.query.clone(),
+                children: vec![identity("child", HierarchyKind::Call)],
+                source: FetchSource::TreeSitter,
+            })
+        ));
+
+        assert_eq!(
+            app.canvas_notice.as_deref(),
+            Some("Tree-sitter: syntactic relations only; dynamic dispatch may be omitted")
+        );
+    }
+
+    #[test]
     fn deduplicates_children_globally_but_preserves_both_direction_relations() {
-        let mut app = App::from_cli(Cli::try_parse_from(["ctree", "call", "root"]).unwrap());
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
         let incoming = app
             .toggle_selected_branch(HierarchyDirection::Incoming, true)
             .unwrap();
@@ -964,6 +1183,157 @@ mod tests {
         assert_eq!(incoming_names, ["shared", "left-only"]);
         assert_eq!(outgoing_names, ["shared", "right-only"]);
         assert_eq!(app.graph.node_count(), 4);
+    }
+
+    #[test]
+    fn refreshes_both_branches_and_preserves_existing_descendant_state() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
+        let incoming = app
+            .toggle_selected_branch(HierarchyDirection::Incoming, true)
+            .unwrap();
+        let caller_identity = identity("caller", HierarchyKind::Call);
+        assert!(app.finish_hierarchy(
+            &incoming,
+            Ok(HierarchyResponse {
+                query: incoming.query.clone(),
+                children: vec![caller_identity.clone()],
+                source: FetchSource::Lsp,
+            })
+        ));
+        let outgoing = app
+            .toggle_selected_branch(HierarchyDirection::Outgoing, true)
+            .unwrap();
+        let removed_identity = identity("removed", HierarchyKind::Call);
+        assert!(app.finish_hierarchy(
+            &outgoing,
+            Ok(HierarchyResponse {
+                query: outgoing.query.clone(),
+                children: vec![removed_identity],
+                source: FetchSource::Lsp,
+            })
+        ));
+
+        let root = app.selected.unwrap();
+        let caller = app.graph.node(root).unwrap().incoming.neighbors[0];
+        app.graph
+            .replace_branch_neighbors(
+                caller,
+                HierarchyDirection::Outgoing,
+                vec![identity("grandchild", HierarchyKind::Call)],
+            )
+            .unwrap();
+        let caller_branch = &mut app.graph.node_mut(caller).unwrap().outgoing;
+        caller_branch.load_state = LoadState::Loaded;
+        caller_branch.expanded = true;
+
+        let requests = app.refresh_selected_branches(true);
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.cache_policy == CachePolicy::Refresh)
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.query.direction)
+                .collect::<Vec<_>>(),
+            [HierarchyDirection::Incoming, HierarchyDirection::Outgoing]
+        );
+        assert!(app.graph.node(root).unwrap().incoming.expanded);
+        assert!(app.graph.node(root).unwrap().outgoing.expanded);
+
+        for request in &requests {
+            let children = match request.query.direction {
+                HierarchyDirection::Incoming => vec![
+                    caller_identity.clone(),
+                    identity("new-caller", HierarchyKind::Call),
+                ],
+                HierarchyDirection::Outgoing => {
+                    vec![identity("new-callee", HierarchyKind::Call)]
+                }
+            };
+            assert!(app.finish_hierarchy(
+                request,
+                Ok(HierarchyResponse {
+                    query: request.query.clone(),
+                    children,
+                    source: FetchSource::Lsp,
+                })
+            ));
+        }
+
+        assert_eq!(app.graph.node(root).unwrap().incoming.neighbors[0], caller);
+        assert!(app.graph.node(caller).unwrap().outgoing.expanded);
+        assert_eq!(
+            branch_names(&app, caller, HierarchyDirection::Outgoing),
+            ["grandchild"]
+        );
+        assert_eq!(
+            branch_names(&app, root, HierarchyDirection::Incoming),
+            ["caller", "new-caller"]
+        );
+        assert_eq!(
+            branch_names(&app, root, HierarchyDirection::Outgoing),
+            ["new-callee"]
+        );
+        let new_callee = app.graph.node(root).unwrap().outgoing.neighbors[0];
+        assert_eq!(
+            app.graph.node(new_callee).unwrap().outgoing.load_state,
+            LoadState::NotLoaded
+        );
+        assert!(
+            app.graph.visible_graph().nodes.iter().all(|node_id| app
+                .graph
+                .node(*node_id)
+                .unwrap()
+                .symbol
+                != "removed")
+        );
+    }
+
+    #[test]
+    fn failed_refresh_keeps_cached_neighbors_and_rejects_older_results() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
+        let initial = app
+            .toggle_selected_branch(HierarchyDirection::Outgoing, true)
+            .unwrap();
+        assert!(app.finish_hierarchy(
+            &initial,
+            Ok(HierarchyResponse {
+                query: initial.query.clone(),
+                children: vec![identity("cached", HierarchyKind::Call)],
+                source: FetchSource::Lsp,
+            })
+        ));
+        let root = app.selected.unwrap();
+
+        let older = app.refresh_selected_branches(true);
+        let current = app.refresh_selected_branches(true);
+        let older_outgoing = older
+            .iter()
+            .find(|request| request.query.direction == HierarchyDirection::Outgoing)
+            .unwrap();
+        assert!(!app.finish_hierarchy(
+            older_outgoing,
+            Ok(HierarchyResponse {
+                query: older_outgoing.query.clone(),
+                children: vec![identity("stale", HierarchyKind::Call)],
+                source: FetchSource::Lsp,
+            })
+        ));
+
+        for request in &current {
+            assert!(app.finish_hierarchy(request, Err("refresh failed".to_owned())));
+        }
+        assert_eq!(
+            branch_names(&app, root, HierarchyDirection::Outgoing),
+            ["cached"]
+        );
+        let outgoing = &app.graph.node(root).unwrap().outgoing;
+        assert_eq!(outgoing.load_state, LoadState::Loaded);
+        assert!(outgoing.expanded);
+        assert_eq!(outgoing.failure(), Some("refresh failed"));
     }
 
     fn item(name: &str) -> SearchItem {

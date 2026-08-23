@@ -1,0 +1,32 @@
+# REQ-9-1：配置与限定名过滤
+
+| 字段 | 值 |
+| --- | --- |
+| 父需求 | `REQ-9` |
+| 状态 | `Implemented` |
+| 优先级 | `P1` |
+| 目标版本 | `0.1` |
+
+## 需求
+
+cgraph 启动时从 `--workspace` 根目录读取 `.cgraph.toml`。`filters.symbols` 按完整显示名过滤 workspace symbol 搜索候选和新加载的 hierarchy 子节点；模式大小写敏感，`*` 匹配任意数量字符。
+
+面向对象方法在对应语言/provider 适配器能够确定容器时显示完整限定名，搜索结果与画布节点使用同一名称，并保留语言惯用分隔符：Rust/C++ 使用 `Class::method`，Python 使用 `Class.method`。Rust trait impl 优先使用具体实现类型，例如 `impl Read for Buffer` 显示为 `Buffer::read`。过滤规则以实际限定名为准，例如 Rust 的 `*::is_some` 或 Python 的 `*.run`。
+
+## 验收条件
+
+- 缺少 `.cgraph.toml` 时保持无过滤的兼容行为。
+- 无效 TOML、未知字段、错误类型和空模式在进入 TUI 前给出包含文件路径的错误。
+- `*` 可以匹配零个或多个 Unicode 字符，其他字符按大小写精确匹配，模式必须覆盖完整显示名。
+- 搜索候选与 incoming/outgoing hierarchy 子节点使用相同过滤器。
+- 显式 CLI anchor 不被静默删除；配置只影响发现结果和后续加载的邻接节点。
+- 限定方法名对应的节点宽度随文本扩展；终端足够宽时不截断类名或方法名。
+
+## 实现证据
+
+- `.cgraph.toml` 提供本项目的实际配置示例。
+- `src/config/mod.rs` 覆盖缺省加载、模式规范化、Unicode 通配符和错误校验。
+- `src/fetch/lsp.rs`、`src/fetch/treesitter.rs` 与 `src/tui/search.rs` 覆盖 provider、语言与搜索展示层的限定方法名。
+- `src/app.rs` 同时验证搜索和 hierarchy 过滤，并确认大小写与整串匹配边界。
+
+语言服务器协议不保证 call hierarchy 一定提供容器信息，且 `detail` 格式由 server 自定。cgraph 不跨语言猜测；缺少对应 adapter、信息缺失或内容是路径/签名时保留 server 原始名称。

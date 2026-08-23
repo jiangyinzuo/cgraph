@@ -1,16 +1,16 @@
 # 语言服务器
 
-ctree 以 LSP 客户端身份启动一个通过 stdin/stdout 通信的语言服务器。当前会话只启动一个 server，因此复杂多语言工作区需要显式选择。
+cgraph 以 LSP 客户端身份启动一个通过 stdin/stdout 通信的语言服务器。当前会话只启动一个 server，因此复杂多语言工作区需要显式选择。
 
-当前每次启动 ctree 都会启动自己的语言服务器；同一次 TUI 会话中的所有搜索会复用该进程，但退出后不会保留 rust-analyzer 的内存索引。这一阶段优先保证会话隔离和确定的 shutdown 生命周期，尚未实现常驻 workspace daemon。
+当前每次启动 cgraph 都会启动自己的语言服务器；同一次 TUI 会话中的所有搜索会复用该进程，但退出后不会保留 rust-analyzer 的内存索引。这一阶段优先保证会话隔离和确定的 shutdown 生命周期，尚未实现常驻 workspace daemon。
 
 TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左侧同时保留快捷键提示。它与 `ac` / `at` 搜索弹窗中的单次查询状态分开维护。
 
-如果没有检测到 LSP、显式使用 `--no-lsp`，或 LSP 启动失败，ctree 会尝试根据工作区浅层标志初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar 和 tags query。成功时底栏显示 `Tree-sitter: <language> · Ready`；初始化失败显示 Error。这个 fallback 当前提供真实语法 parser 状态，但 workspace symbol 搜索和 hierarchy 查询仍需要 LSP，不会被伪装成 Tree-sitter 已支持。
+如果没有检测到 LSP、显式使用 `--no-lsp`，或 LSP 启动失败，cgraph 会尝试根据工作区浅层标志初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar 和 tags query。成功时底栏显示 `Tree-sitter: <language> · Ready`；初始化失败显示 Error。第一次 workspace symbol 搜索或 hierarchy 展开会在 blocking task 中惰性建立项目静态索引，后续查询复用该索引。
 
 ## 自动检测
 
-如果没有传入 `--lsp` 或 `--no-lsp`，ctree 按以下顺序检查工作区根目录：
+如果没有传入 `--lsp` 或 `--no-lsp`，cgraph 按以下顺序检查工作区根目录：
 
 1. `Cargo.toml` → `rust-analyzer`
 2. `compile_commands.json`、`CMakeLists.txt` 或根目录 C/C++ 文件 → `clangd`
@@ -21,55 +21,58 @@ TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左�
 ## 显式配置
 
 ```bash
-ctree --lsp rust-analyzer --workspace /work/project
-ctree --lsp clangd --lsp-arg=--background-index --workspace /work/project
-ctree --lsp pylsp --workspace /work/project
+cgraph --lsp rust-analyzer --workspace /work/project
+cgraph --lsp clangd --lsp-arg=--background-index --workspace /work/project
+cgraph --lsp pylsp --workspace /work/project
 ```
 
 `--lsp` 当前接受可执行程序名，不解析一整段 shell 命令。每个参数都要单独写成 `--lsp-arg`，这样可以避免 shell 拼接和转义歧义。
 
 ## 初始化行为
 
-ctree 会发送：
+cgraph 会发送：
 
 - 当前进程 id；
 - canonicalized workspace URI；
 - workspace folder；
 - workspace symbol、call hierarchy、type hierarchy、workspace folders 和 configuration 客户端能力；
+- 仅支持 UTF-16 的 position encoding 能力；server 未声明时按 LSP 默认 UTF-16 解释，显式选择其他编码则拒绝会话；
 - 标准 `window.workDoneProgress` 客户端能力；
 - rust-analyzer 使用的实验性 server status notification 能力；
 - 客户端名称与版本；
 - 可选 initialization options（当前只在库 API 中配置）。
 
-server 必须在 initialize 结果中声明支持 `workspace/symbol`，否则 ctree 会保留 TUI，但搜索框显示 LSP 不可用。
+server 必须在 initialize 结果中声明支持 `workspace/symbol`，否则 cgraph 会保留 TUI，但搜索框显示 LSP 不可用。
 
 ## 连接与后台进度
 
 initialize 成功后，底部状态摘要首先显示 `Ready`。这只表示 LSP 会话已经建立，不保证语言服务器已经完成项目加载和符号索引。
 
-ctree 会持续读取标准 `$/progress` work-done 通知，并显示最近更新的活动任务。多个任务并行时，一个任务结束不会错误地把整体状态切回 `Ready`；最后一个已知任务结束后才恢复就绪。任务提供百分比时会限制在 0–100 后显示。rust-analyzer 的 `experimental/serverStatus` 会转换为相同的 `Ready`、`Working`、`Warning` 或 `Error` 状态。连接结束则显示 `Disconnected`。
+cgraph 会持续读取标准 `$/progress` work-done 通知，并显示最近更新的活动任务。多个任务并行时，一个任务结束不会错误地把整体状态切回 `Ready`；最后一个已知任务结束后才恢复就绪。任务提供百分比时会限制在 0–100 后显示。rust-analyzer 的 `experimental/serverStatus` 会转换为相同的 `Ready`、`Working`、`Warning` 或 `Error` 状态。连接结束则显示 `Disconnected`。
 
-并非所有语言服务器都会发送进度通知。没有进度不代表没有后台索引，`Ready` 的准确含义仍受 server 实现限制。ctree 当前也不从 stderr 推断状态。
+并非所有语言服务器都会发送进度通知。没有进度不代表没有后台索引，`Ready` 的准确含义仍受 server 实现限制。cgraph 当前也不从 stderr 推断状态。
 
 ## 索引与查询时机
 
-语言服务器可能在 initialize 后继续索引。ctree 会在后台处理 `workspace/configuration` 等反向请求，所以索引不会因为 UI 空闲而停住；但大型项目的第一次查询仍可能较慢或暂时为空。
+语言服务器可能在 initialize 后继续索引。cgraph 会在后台处理 `workspace/configuration` 等反向请求，所以索引不会因为 UI 空闲而停住；但大型项目的第一次查询仍可能较慢或暂时为空。
 
-ctree 采用与 VS Code workspace symbol quick access 相同的查询节奏。打开 `ac` / `at` 或输入发生变化后，会等待约 200 ms；期间再次输入会重置计时。等待结束后，当前完整文本通过 `workspace/symbol` 发送给 server，包括空文本。
+cgraph 采用与 VS Code workspace symbol quick access 相同的查询节奏。打开 `ac` / `at` 或输入发生变化后，会等待约 200 ms；期间再次输入会重置计时。等待结束后，当前完整文本交给当前 provider。LSP 模式通过 `workspace/symbol` 发送给 server，包括空文本；Tree-sitter 模式从惰性项目索引返回全部候选，再由 App 做相同的本地模糊筛选。
 
-UI 在等待阶段显示 `Waiting for typing pause…`。防抖结束后，后台任务先通知 App 请求已经开始，再调用 LSP client，此时状态才切换为 `Searching workspace symbols…`。这两个状态分别表示客户端本地等待和实际 server 查询。
+UI 在等待阶段显示 `Waiting for typing pause…`。防抖结束后，后台任务先通知 App 请求已经开始，再调用 provider client，此时状态才切换为 `Searching workspace symbols…`。这两个状态分别表示客户端本地等待和实际 provider 查询；Tree-sitter 的第一次查询包含项目索引时间。
 
 新的文本会中止之前的查询任务。如果旧请求已经写入 server，JSON-RPC 层会发送 `$/cancelRequest`；request id 还会作为第二道防线，忽略 server 在取消后仍然返回的旧结果。关闭弹窗也会取消尚未完成的查询。
 
-rust-analyzer 默认只搜索类型。ctree 在 initialization options 和 `workspace/configuration` 中设置 `kind=all_symbols` 与 `scope=workspace`，使 call 搜索可以获得函数，同时不包含依赖；结果数量保留 rust-analyzer 为逐查询客户端设计的默认 128 项上限。其他 server 直接接收标准查询文本。
+rust-analyzer 默认只搜索类型。cgraph 在 initialization options 和 `workspace/configuration` 中设置 `kind=all_symbols` 与 `scope=workspace`，使 call 搜索可以获得函数，同时不包含依赖；结果数量保留 rust-analyzer 为逐查询客户端设计的默认 128 项上限。其他 server 直接接收标准查询文本。
 
-server 返回后，ctree 会按符号身份去重、按 call/type 所需的 `SymbolKind` 过滤、进行本地模糊评分，并只保留 URI 位于 canonical workspace 根目录下的符号。路径过滤是对 server scope 的额外保护；虚拟文档和非文件 URI 当前不会进入候选列表。
+provider 返回后，cgraph 会按符号身份去重、按 call/type 所需的 `SymbolKind` 过滤并进行本地模糊评分。LSP 结果还会只保留 URI 位于 canonical workspace 根目录下的符号；Tree-sitter 从一开始只扫描项目源文件，并跳过隐藏目录、`target`、`node_modules` 和符号链接。
 
 ## Hierarchy 查询
 
-首次展开 call 分支时，ctree 先发送 `textDocument/prepareCallHierarchy`，再按方向发送 `callHierarchy/incomingCalls` 或 `callHierarchy/outgoingCalls`。type 分支对应 `textDocument/prepareTypeHierarchy` 与 `typeHierarchy/supertypes` / `typeHierarchy/subtypes`。prepare 返回的协议 item 会原样带入第二阶段请求，孩子随后归一化为名称、种类和源码位置。
+首次展开 call 分支时，cgraph 先发送 `textDocument/prepareCallHierarchy`，再按方向发送 `callHierarchy/incomingCalls` 或 `callHierarchy/outgoingCalls`。type 分支对应 `textDocument/prepareTypeHierarchy` 与 `typeHierarchy/supertypes` / `typeHierarchy/subtypes`。prepare 返回的协议 item 会原样带入第二阶段请求，邻接结果随后归一化为名称、种类和源码位置，并按 resolved identity 写入全局关系图；不同路径发现的同一节点只显示一次。
 
-每个节点的左右分支独立保存 `NotLoaded`、`Loading`、`Loaded` 或 `Failed`。成功结果（包括成功的空结果）会缓存；失败不会伪装成空结果，按相同方向键或点击 `[!]` 可以重试。语言服务器未实现某个标准方法时也会进入明确错误状态。当前 Tree-sitter fallback 尚不提供 hierarchy。
+每个节点的左右分支独立保存 `NotLoaded`、`Loading`、`Loaded` 或 `Failed`。成功结果（包括成功的空结果）会缓存；失败不会伪装成空结果，按相同方向键或点击 `[!]` 可以重试。语言服务器未实现某个标准方法时也会进入明确错误状态。
+
+Tree-sitter 使用同一个方向模型：caller/parent 指向 callee/child。Rust 和 Python 使用 grammar tags 中的直接调用捕获，C/C++ 使用 `call_expression`；Rust trait impl、C++ base class 和 Python superclass 形成类型边，C 没有语言级继承边。只有名称能在项目定义中唯一绑定时才建立关系，方法优先在当前类/impl 内绑定。动态分派、宏展开后的调用、复杂 import/namespace 解析和歧义目标可能省略，因此每次成功结果都会在 footer 显示 `syntactic relations only`，不能将它等同于 LSP 完整语义。
 
 ## 独立诊断示例
 

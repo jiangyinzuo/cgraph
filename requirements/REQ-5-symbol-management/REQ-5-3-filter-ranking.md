@@ -22,4 +22,4 @@ server 返回的 workspace symbols 应去重，并按当前 query 在本地执�
 
 ## 当前边界
 
-ctree 仍遵守 server 的单次结果数量上限；本地排序不会枚举 server 未返回的全部索引。
+cgraph 仍遵守 server 的单次结果数量上限；本地排序不会枚举 server 未返回的全部索引。

@@ -9,12 +9,12 @@
 
 ## 需求
 
-ctree 必须支持以下入口：
+cgraph 必须支持以下入口：
 
 ```text
-ctree
-ctree call <SYMBOL>
-ctree type <SYMBOL>
+cgraph
+cgraph call <SYMBOL>
+cgraph type <SYMBOL>
 ```
 
 无子命令时打开空画布；call/type 子命令分别创建对应种类的初始 anchor。工作区默认是当前目录，并允许通过 `--workspace` 覆盖。

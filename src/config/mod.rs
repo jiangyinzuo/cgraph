@@ -1,11 +1,17 @@
 #![doc = include_str!("README.md")]
 
-use std::{fs, io::ErrorKind, path::Path};
+use std::{
+    fs::{self, OpenOptions},
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-pub const PROJECT_CONFIG_FILE: &str = ".ctree.toml";
+pub const PROJECT_CONFIG_FILE: &str = ".cgraph.toml";
+const PROJECT_CONFIG_TEMPLATE: &str =
+    "# Full symbol names; * matches any number of characters.\n[filters]\nsymbols = []\n";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SymbolFilter {
@@ -70,8 +76,30 @@ pub struct ProjectConfig {
 }
 
 impl ProjectConfig {
+    pub fn path(workspace_root: &Path) -> PathBuf {
+        workspace_root.join(PROJECT_CONFIG_FILE)
+    }
+
+    pub fn create_if_missing(workspace_root: &Path) -> Result<PathBuf> {
+        let path = Self::path(workspace_root);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => file
+                .write_all(PROJECT_CONFIG_TEMPLATE.as_bytes())
+                .with_context(|| {
+                    format!("failed to initialize project config {}", path.display())
+                })?,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create project config {}", path.display())
+                });
+            }
+        }
+        Ok(path)
+    }
+
     pub fn load(workspace_root: &Path) -> Result<Self> {
-        let path = workspace_root.join(PROJECT_CONFIG_FILE);
+        let path = Self::path(workspace_root);
         let contents = match fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
@@ -115,11 +143,16 @@ mod tests {
     fn loads_and_normalizes_project_local_symbol_filters() {
         let workspace = temporary_workspace("load");
         assert_eq!(ProjectConfig::load(&workspace).unwrap(), Default::default());
+        let path = ProjectConfig::create_if_missing(&workspace).unwrap();
+        assert_eq!(path, workspace.join(".cgraph.toml"));
+        assert_eq!(ProjectConfig::load(&workspace).unwrap(), Default::default());
         fs::write(
-            workspace.join(".ctree.toml"),
+            &path,
             "[filters]\nsymbols = [\"*::into\", \" Option::is_some \", \"*::into\", \"*::Some\"]\n",
         )
         .unwrap();
+        ProjectConfig::create_if_missing(&workspace).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("*::into"));
 
         let config = ProjectConfig::load(&workspace).unwrap();
 
@@ -140,7 +173,7 @@ mod tests {
     fn rejects_invalid_or_empty_filter_entries() {
         let workspace = temporary_workspace("invalid");
         fs::write(
-            workspace.join(".ctree.toml"),
+            workspace.join(".cgraph.toml"),
             "[filters]\nsymbols = [\"  \"]\n",
         )
         .unwrap();
@@ -149,7 +182,7 @@ mod tests {
 
         assert!(format!("{error:#}").contains("empty pattern"));
         fs::write(
-            workspace.join(".ctree.toml"),
+            workspace.join(".cgraph.toml"),
             "[filters]\nsymbols = []\nunknown = true\n",
         )
         .unwrap();
@@ -163,7 +196,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("ctree-config-{name}-{unique}"));
+        let workspace = std::env::temp_dir().join(format!("cgraph-config-{name}-{unique}"));
         fs::create_dir(&workspace).unwrap();
         workspace
     }
