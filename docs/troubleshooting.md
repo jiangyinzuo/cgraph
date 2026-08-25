@@ -7,13 +7,15 @@
 ```bash
 rust-analyzer --version
 clangd --version
-pylsp --version
+pyrefly --version
 ```
 
 如果项目没有自动检测标志，显式传入：
 
 ```bash
 cgraph --lsp rust-analyzer --workspace /path/to/project
+# Python 默认命令；cgraph 会自动添加 `lsp` 子命令：
+cgraph --lsp pyrefly --workspace /path/to/project
 ```
 
 cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状态栏和搜索框中。当前 server stderr 为了避免破坏 TUI 备用屏幕而被丢弃；更详细的日志输出仍是待实现功能。需要绕过损坏或缺失的 LSP 时，可以使用 `--no-lsp` 强制尝试 Tree-sitter 回退。
@@ -31,6 +33,7 @@ cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状�
 - workspace 根目录的 `.cgraph.toml` 匹配了该完整显示名；临时移除对应模式并重启可确认。
 - server 对单次 workspace symbol 响应设有数量上限；输入更精确的查询可以缩小结果集。
 - server 自身的 workspace symbol 能力未覆盖该语言或文件。
+- Pyrefly 当前要求 workspace-symbol query 至少包含 3 个字符；更短输入会由 server 返回空结果。
 - Tree-sitter 会跳过隐藏目录、`target`、`node_modules` 和符号链接；这些位置中的符号不会进入静态索引。
 
 使用独立示例区分 TUI 过滤和 server 原始结果：
@@ -62,7 +65,7 @@ cargo run --example lsp_hierarchy -- rust-analyzer call outgoing main /path/to/p
 - `Tree-sitter: <language> · Ready` 表示 grammar 和 tags query 已初始化；第一次搜索或展开会惰性建立项目静态索引。展开后的 `syntactic relations only` 提示表示动态、歧义或项目外关系可能省略。
 - `Backend: none · Inactive` 表示没有 LSP，且工作区未检测到 Rust、C、C++ 或 Python 的 Tree-sitter 标志。
 
-快捷键和状态始终共用最底部一行。终端较窄时两侧文字各自在分配区域中截断，不代表快捷键或后端被关闭。
+快捷键和状态始终共用最底部一行，状态紧跟快捷键提示。终端较窄时整行从右侧自然截断，不代表快捷键或后端被关闭；扩大终端可看到完整状态摘要。
 
 ## server 参数无法识别
 

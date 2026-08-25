@@ -23,7 +23,7 @@ cgraph process
 - request id、取消请求、server 反向请求和 shutdown 生命周期都只有一个所有者。
 - 不依赖 rust-analyzer 未承诺稳定性的内部接口或私有传输协议。
 - cgraph 崩溃或配置错误不会影响编辑器正在使用的 rust-analyzer。
-- 当前实现可以继续用于 clangd、pylsp 等其他 stdio LSP server，而不把主流程绑定到 Rust 专用 daemon。
+- 当前实现可以继续用于 clangd、Pyrefly、pylsp 等其他 stdio LSP server，而不把主流程绑定到 Rust 专用 daemon。
 
 代价是每次重新启动 cgraph 都会失去 rust-analyzer 的内存缓存，首次语义查询可能明显慢于已经打开一段时间的编辑器。
 

@@ -12,9 +12,9 @@
 | --- | --- |
 | Rust | `rust-analyzer` |
 | C/C++ | `clangd` |
-| Python | `pylsp` |
+| Python | Pyrefly（`pyrefly lsp`） |
 
-语言服务器不随 cgraph 一起安装，请使用系统包管理器、Rust 工具链或对应语言的包管理器安装。也可以使用 `--no-lsp` 明确进入 Tree-sitter 静态模式。
+语言服务器不随 cgraph 一起安装，请使用系统包管理器、Rust 工具链或对应语言的包管理器安装。Python 工作区需要让 `pyrefly` 位于 `PATH`；cgraph 会自动添加 `lsp` 子命令。也可以使用 `--no-lsp` 明确进入 Tree-sitter 静态模式。
 
 ## 安装与运行
 

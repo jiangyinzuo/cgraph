@@ -3,6 +3,7 @@
 //! The transport is implemented locally because `tower-lsp` supplies protocol
 //! types and server infrastructure, but cgraph needs to act as an LSP client.
 
+mod pyrefly;
 mod symbol_names;
 
 use std::{
@@ -28,12 +29,13 @@ use tokio::{
 use tower_lsp::lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, ClientCapabilities, ClientInfo, DocumentSymbol,
-    DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
-    GeneralClientCapabilities, InitializeParams, InitializeResult, Location, NumberOrString, OneOf,
-    PartialResultParams, Position, PositionEncodingKind, ProgressParams, ProgressParamsValue,
-    Range, ServerInfo, SymbolInformation, SymbolKind, TextDocumentClientCapabilities,
-    TextDocumentIdentifier, TextDocumentPositionParams, TypeHierarchyClientCapabilities,
+    CallHierarchyPrepareParams, ClientCapabilities, ClientInfo, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolClientCapabilities,
+    DocumentSymbolParams, DocumentSymbolResponse, GeneralClientCapabilities, InitializeParams,
+    InitializeResult, Location, NumberOrString, OneOf, PartialResultParams, Position,
+    PositionEncodingKind, ProgressParams, ProgressParamsValue, Range, ServerInfo,
+    SymbolInformation, SymbolKind, TextDocumentClientCapabilities, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TypeHierarchyClientCapabilities,
     TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
     TypeHierarchySupertypesParams, Url, WindowClientCapabilities, WorkDoneProgress,
     WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
@@ -73,6 +75,20 @@ impl LspConfig {
             workspace_root: workspace_root.into(),
             initialization_options: None,
         }
+    }
+
+    /// Builds the command line expected by a supported language-server binary.
+    ///
+    /// Most servers enter LSP mode directly. Pyrefly exposes it as the
+    /// `pyrefly lsp` subcommand, so callers should use this constructor when
+    /// the configured value is a server executable rather than a raw command.
+    pub fn for_server(program: impl Into<OsString>, workspace_root: impl Into<PathBuf>) -> Self {
+        let program = program.into();
+        let mut config = Self::new(program.clone(), workspace_root);
+        if is_pyrefly_program(&program) {
+            config.args.push(OsString::from("lsp"));
+        }
+        config
     }
 
     pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
@@ -218,7 +234,7 @@ impl HierarchyClient {
             return Ok(document_position(uri, Position::new(line, character)));
         }
 
-        let lookup_name = symbol.symbol.rsplit("::").next().unwrap_or(&symbol.symbol);
+        let lookup_name = symbol_leaf_name(&symbol.symbol);
         let candidates = WorkspaceSymbolClient {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
@@ -229,7 +245,7 @@ impl HierarchyClient {
         .into_iter()
         .filter(|candidate| {
             candidate.range.is_some()
-                && candidate.name.rsplit("::").next() == Some(lookup_name)
+                && symbol_leaf_name(&candidate.name) == lookup_name
                 && symbol_kind_matches_hierarchy(symbol.kind, candidate.kind)
         })
         .collect::<Vec<_>>();
@@ -442,6 +458,7 @@ pub struct LspProvider {
     server_info: Option<ServerInfo>,
     symbol_names: SymbolNameAdapter,
     document_symbols: DocumentSymbolCache,
+    bootstrap_document: Option<Url>,
     status_receiver: Option<mpsc::UnboundedReceiver<LspStatusUpdate>>,
 }
 
@@ -552,6 +569,30 @@ impl LspProvider {
                 .as_ref()
                 .map(|info| info.name.as_str()),
         );
+        let bootstrap_document = if symbol_names.is_pyrefly() {
+            match pyrefly::bootstrap_document(&workspace_root) {
+                Some(document) => {
+                    client
+                        .notify(
+                            "textDocument/didOpen",
+                            DidOpenTextDocumentParams {
+                                text_document: TextDocumentItem {
+                                    uri: document.uri.clone(),
+                                    language_id: "python".to_owned(),
+                                    version: 0,
+                                    text: document.text,
+                                },
+                            },
+                        )
+                        .await
+                        .context("failed to open Pyrefly index bootstrap document")?;
+                    Some(document.uri)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         Ok(Self {
             child,
             client,
@@ -560,6 +601,7 @@ impl LspProvider {
             server_info: initialize_result.server_info,
             symbol_names,
             document_symbols: Arc::new(Mutex::new(HashMap::new())),
+            bootstrap_document,
             status_receiver: Some(status_receiver),
         })
     }
@@ -600,6 +642,17 @@ impl LspProvider {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(uri) = self.bootstrap_document.take() {
+            let _ = self
+                .client
+                .notify(
+                    "textDocument/didClose",
+                    DidCloseTextDocumentParams {
+                        text_document: TextDocumentIdentifier::new(uri),
+                    },
+                )
+                .await;
+        }
         let shutdown_result = self
             .client
             .request::<_, ()>(Shutdown::METHOD, ())
@@ -1168,8 +1221,29 @@ fn requested_configuration(section: Option<&str>) -> Value {
         }),
         Some("rust-analyzer.workspace.symbol.search.kind") => json!("all_symbols"),
         Some("rust-analyzer.workspace.symbol.search.scope") => json!("workspace"),
+        Some("python") => json!({}),
         _ => Value::Null,
     }
+}
+
+fn is_pyrefly_program(program: &OsStr) -> bool {
+    Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy()
+        .trim_end_matches(".exe")
+        .eq_ignore_ascii_case("pyrefly")
+}
+
+fn symbol_leaf_name(symbol: &str) -> &str {
+    let symbol = symbol
+        .rsplit_once("::")
+        .map(|(_, name)| name)
+        .unwrap_or(symbol);
+    symbol
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(symbol)
 }
 
 fn workspace_name(workspace_root: &Path) -> String {
@@ -1524,8 +1598,9 @@ where
 mod tests {
     use std::{
         ffi::OsStr,
+        fs,
         path::{Path, PathBuf},
-        time::Duration,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use serde_json::{Value, json};
@@ -1538,11 +1613,11 @@ mod tests {
 
     use super::symbol_names::SymbolNameAdapter;
     use super::{
-        HierarchyClient, LspProgressTracker, LspStatusUpdate, WorkspaceSymbolMatch,
-        client_capabilities, deduplicate_symbols, handle_server_notification, normalize_symbols,
-        read_message, requested_configuration, response_id, spawn_json_rpc,
-        symbol_belongs_to_workspace, uses_utf16_positions, workspace_symbol_initialization_options,
-        write_message,
+        HierarchyClient, LspConfig, LspProgressTracker, LspProvider, LspStatusUpdate,
+        WorkspaceSymbolMatch, client_capabilities, deduplicate_symbols, handle_server_notification,
+        normalize_symbols, read_message, requested_configuration, response_id, spawn_json_rpc,
+        symbol_belongs_to_workspace, symbol_leaf_name, uses_utf16_positions,
+        workspace_symbol_initialization_options, write_message,
     };
     use crate::{
         fetch::{FetchSource, HierarchyQuery},
@@ -1579,6 +1654,7 @@ mod tests {
             Value::Null
         );
         assert_eq!(requested_configuration(Some("clangd")), Value::Null);
+        assert_eq!(requested_configuration(Some("python")), json!({}));
 
         let options = workspace_symbol_initialization_options(
             OsStr::new("rust-analyzer"),
@@ -1607,6 +1683,22 @@ mod tests {
             ),
             Some(json!({ "clangd": true }))
         );
+    }
+
+    #[test]
+    fn configures_pyrefly_command_and_python_symbol_leaf_names() {
+        let config = LspConfig::for_server("/tools/pyrefly.exe", "/workspace")
+            .arg("--indexing-mode")
+            .arg("lazy-blocking");
+        assert_eq!(config.program, OsStr::new("/tools/pyrefly.exe"));
+        assert_eq!(
+            config.args,
+            ["lsp", "--indexing-mode", "lazy-blocking"].map(std::ffi::OsString::from)
+        );
+        assert!(LspConfig::for_server("pylsp", "/workspace").args.is_empty());
+        assert_eq!(symbol_leaf_name("Worker.run"), "run");
+        assert_eq!(symbol_leaf_name("Worker::run"), "run");
+        assert_eq!(symbol_leaf_name("run"), "run");
     }
 
     #[test]
@@ -2025,6 +2117,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn integrates_with_installed_pyrefly() {
+        if !external_server_available("pyrefly").await {
+            eprintln!("skipping real Pyrefly integration test: pyrefly is not in PATH");
+            return;
+        }
+
+        let workspace = external_server_workspace("pyrefly");
+        fs::write(workspace.join("pyrefly.toml"), "").unwrap();
+        fs::write(
+            workspace.join("main.py"),
+            "class Worker:\n    def run(self) -> None:\n        helper()\n\n\ndef helper() -> None:\n    pass\n\n\ndef main() -> None:\n    Worker().run()\n",
+        )
+        .unwrap();
+
+        let lsp = timeout(
+            Duration::from_secs(30),
+            LspProvider::start(
+                LspConfig::for_server("pyrefly", &workspace)
+                    .arg("--indexing-mode")
+                    .arg("lazy-blocking"),
+            ),
+        )
+        .await
+        .expect("Pyrefly initialization timed out")
+        .unwrap();
+        assert_eq!(
+            lsp.server_info().map(|info| info.name.as_str()),
+            Some("pyrefly-lsp")
+        );
+
+        let helper = wait_for_workspace_symbol(&lsp, "helper").await;
+        let position = helper.range.unwrap().start;
+        let response = timeout(
+            Duration::from_secs(30),
+            lsp.hierarchy_client().query(HierarchyQuery {
+                symbol: SymbolIdentity {
+                    symbol: helper.name,
+                    kind: HierarchyKind::Call,
+                    location: Some(SourceLocation {
+                        uri: helper.uri.to_string(),
+                        line: Some(position.line),
+                        character: Some(position.character),
+                    }),
+                },
+                direction: HierarchyDirection::Incoming,
+            }),
+        )
+        .await
+        .expect("Pyrefly call hierarchy timed out")
+        .unwrap();
+        assert!(
+            response
+                .children
+                .iter()
+                .any(|child| child.symbol == "Worker.run")
+        );
+
+        lsp.shutdown().await.unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn integrates_with_installed_rust_analyzer() {
+        if !external_server_available("rust-analyzer").await {
+            eprintln!("skipping real rust-analyzer integration test: rust-analyzer is not in PATH");
+            return;
+        }
+
+        let workspace = external_server_workspace("rust-analyzer");
+        fs::create_dir(workspace.join("src")).unwrap();
+        fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"cgraph-ra-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("src/main.rs"),
+            "fn helper() {}\n\nfn main() {\n    helper();\n}\n",
+        )
+        .unwrap();
+
+        let lsp = timeout(
+            Duration::from_secs(60),
+            LspProvider::start(LspConfig::for_server("rust-analyzer", &workspace)),
+        )
+        .await
+        .expect("rust-analyzer initialization timed out")
+        .unwrap();
+        let main = wait_for_workspace_symbol(&lsp, "main").await;
+        let position = main.range.unwrap().start;
+        let query = HierarchyQuery {
+            symbol: SymbolIdentity {
+                symbol: main.name,
+                kind: HierarchyKind::Call,
+                location: Some(SourceLocation {
+                    uri: main.uri.to_string(),
+                    line: Some(position.line),
+                    character: Some(position.character),
+                }),
+            },
+            direction: HierarchyDirection::Outgoing,
+        };
+        let response = timeout(Duration::from_secs(30), async {
+            loop {
+                match lsp.hierarchy_client().query(query.clone()).await {
+                    Ok(response) => break response,
+                    Err(error)
+                        if error
+                            .chain()
+                            .any(|cause| cause.to_string().contains("content modified")) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(error) => panic!("rust-analyzer call hierarchy failed: {error:#}"),
+                }
+            }
+        })
+        .await
+        .expect("rust-analyzer call hierarchy did not stabilize");
+        assert!(
+            response
+                .children
+                .iter()
+                .any(|child| child.symbol == "helper")
+        );
+
+        lsp.shutdown().await.unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
     async fn rejects_oversized_messages() {
         use tokio::io::AsyncWriteExt;
 
@@ -2040,6 +2263,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("too large"));
+    }
+
+    async fn external_server_available(program: &str) -> bool {
+        tokio::process::Command::new(program)
+            .arg("--version")
+            .output()
+            .await
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn external_server_workspace(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("cgraph-{name}-{unique}"));
+        fs::create_dir(&workspace).unwrap();
+        workspace
+    }
+
+    async fn wait_for_workspace_symbol(
+        lsp: &LspProvider,
+        expected_name: &str,
+    ) -> WorkspaceSymbolMatch {
+        timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(symbol) = lsp
+                    .workspace_symbols(expected_name)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|symbol| symbol.name == expected_name)
+                {
+                    return symbol;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{expected_name:?} did not appear in workspace symbols"))
     }
 
     fn symbol(uri: &str) -> WorkspaceSymbolMatch {

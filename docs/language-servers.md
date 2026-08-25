@@ -14,7 +14,7 @@ TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左�
 
 1. `Cargo.toml` → `rust-analyzer`
 2. `compile_commands.json`、`CMakeLists.txt` 或根目录 C/C++ 文件 → `clangd`
-3. `pyproject.toml`、`setup.py`、`requirements.txt` 或根目录 `.py` 文件 → `pylsp`
+3. `pyproject.toml`、`pyrefly.toml`、`setup.py`、`requirements.txt` 或根目录 `.py` 文件 → `pyrefly lsp`
 
 检测是有意保持简单的启动便利功能，不会递归扫描整个仓库，也不会解析编辑器配置。monorepo、多语言仓库或自定义 server 应显式配置。
 
@@ -23,10 +23,12 @@ TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左�
 ```bash
 cgraph --lsp rust-analyzer --workspace /work/project
 cgraph --lsp clangd --lsp-arg=--background-index --workspace /work/project
+cgraph --lsp pyrefly --workspace /work/project
+# 仍可显式选择其他 Python LSP：
 cgraph --lsp pylsp --workspace /work/project
 ```
 
-`--lsp` 当前接受可执行程序名，不解析一整段 shell 命令。每个参数都要单独写成 `--lsp-arg`，这样可以避免 shell 拼接和转义歧义。
+`--lsp` 当前接受可执行程序名，不解析一整段 shell 命令。每个参数都要单独写成 `--lsp-arg`，这样可以避免 shell 拼接和转义歧义。Pyrefly 是已知例外：选择可执行文件 `pyrefly` 时，cgraph 自动把 `lsp` 作为第一个参数，用户不应再手工添加；例如可用 `--lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking` 覆盖其索引模式。
 
 ## 初始化行为
 
@@ -65,6 +67,10 @@ UI 在等待阶段显示 `Waiting for typing pause…`。防抖结束后，后�
 rust-analyzer 默认只搜索类型。cgraph 在 initialization options 和 `workspace/configuration` 中设置 `kind=all_symbols` 与 `scope=workspace`，使 call 搜索可以获得函数，同时不包含依赖；结果数量保留 rust-analyzer 为逐查询客户端设计的默认 128 项上限。其他 server 直接接收标准查询文本。
 
 provider 返回后，cgraph 会按符号身份去重、按 call/type 所需的 `SymbolKind` 过滤并进行本地模糊评分。LSP 结果还会只保留 URI 位于 canonical workspace 根目录下的符号；Tree-sitter 从一开始只扫描项目源文件，并跳过隐藏目录、`target`、`node_modules` 和符号链接。
+
+Pyrefly 自身只在 query 至少有 3 个字符时执行 workspace-symbol 搜索；空文本、1 个字符或 2 个字符会返回空结果。cgraph 仍按统一节奏发送每次完整 query，不在 UI 中制造额外门槛，也不会为 server 未返回的内容伪造候选。Pyrefly 默认的后台索引模式声明标准 call/type hierarchy；使用 `--indexing-mode none` 会由 server 关闭这些能力。Pyrefly hierarchy 中能够确认的方法按 `Class.method` 显示，模块函数保持原名。
+
+为触发 Pyrefly 的 lazy workspace index，cgraph 会只读打开一个受限大小的项目 Python 文件，并在 LSP shutdown 前关闭它；不会发送 change 或 save。文件发现会跳过隐藏目录、构建目录、虚拟环境、依赖目录和符号链接。若项目内没有安全可读的 `.py` 文件，LSP 连接仍会建立，但首次符号查询可能为空。
 
 ## Hierarchy 查询
 

@@ -8,6 +8,7 @@ use tower_lsp::lsp_types::SymbolKind;
 pub(super) enum SymbolNameAdapter {
     Standard,
     RustAnalyzer,
+    Pyrefly,
 }
 
 impl SymbolNameAdapter {
@@ -19,6 +20,8 @@ impl SymbolNameAdapter {
         if server_name.is_some_and(is_rust_analyzer_name) || is_rust_analyzer_name(&configured_name)
         {
             Self::RustAnalyzer
+        } else if server_name.is_some_and(is_pyrefly_name) || is_pyrefly_name(&configured_name) {
+            Self::Pyrefly
         } else {
             Self::Standard
         }
@@ -33,11 +36,16 @@ impl SymbolNameAdapter {
         match self {
             Self::Standard => qualify_callable(name, kind, container_name.and_then(safe_container)),
             Self::RustAnalyzer => rust_callable(name, kind, container_name),
+            Self::Pyrefly => python_workspace_callable(name, kind, container_name),
         }
     }
 
     pub(super) fn uses_document_symbols(self) -> bool {
         self == Self::RustAnalyzer
+    }
+
+    pub(super) fn is_pyrefly(self) -> bool {
+        self == Self::Pyrefly
     }
 
     pub(super) fn call_hierarchy_item(
@@ -59,6 +67,7 @@ impl SymbolNameAdapter {
                     normalized
                 }
             }
+            Self::Pyrefly => pyrefly_hierarchy_callable(name, kind, detail),
         }
     }
 }
@@ -68,6 +77,71 @@ fn is_rust_analyzer_name(name: &str) -> bool {
         name.trim_end_matches(".exe").to_ascii_lowercase().as_str(),
         "rust-analyzer" | "rust_analyzer"
     )
+}
+
+fn is_pyrefly_name(name: &str) -> bool {
+    matches!(
+        name.trim_end_matches(".exe").to_ascii_lowercase().as_str(),
+        "pyrefly" | "pyrefly-lsp" | "pyrefly_lsp"
+    )
+}
+
+fn python_workspace_callable(name: &str, kind: SymbolKind, container: Option<&str>) -> String {
+    if !matches!(kind, SymbolKind::METHOD | SymbolKind::CONSTRUCTOR) {
+        return name.to_owned();
+    }
+
+    let short_name = name.rsplit('.').next().unwrap_or(name);
+    let owner = container
+        .and_then(safe_python_container)
+        .or_else(|| name.rsplit_once('.').map(|(owner, _)| owner))
+        .and_then(|owner| owner.rsplit('.').next())
+        .filter(|owner| is_python_identifier(owner));
+    owner.map_or_else(|| name.to_owned(), |owner| format!("{owner}.{short_name}"))
+}
+
+fn pyrefly_hierarchy_callable(name: &str, kind: SymbolKind, detail: Option<&str>) -> String {
+    if !matches!(kind, SymbolKind::METHOD | SymbolKind::CONSTRUCTOR) {
+        return name.to_owned();
+    }
+
+    let short_name = name.rsplit('.').next().unwrap_or(name);
+    let owner = detail
+        .and_then(safe_python_detail_owner)
+        .or_else(|| name.rsplit_once('.').map(|(owner, _)| owner))
+        .and_then(|owner| owner.rsplit('.').next())
+        .filter(|owner| is_python_identifier(owner));
+    owner.map_or_else(|| name.to_owned(), |owner| format!("{owner}.{short_name}"))
+}
+
+fn safe_python_container(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(['/', '\\', '(', ')', '\n']) {
+        return None;
+    }
+    value
+        .rsplit('.')
+        .next()
+        .filter(|owner| is_python_identifier(owner))
+}
+
+fn safe_python_detail_owner(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(['/', '\\', '(', ')', '\n']) {
+        return None;
+    }
+    value
+        .rsplit_once('.')
+        .map(|(owner, _)| owner)
+        .filter(|owner| !owner.is_empty())
+}
+
+fn is_python_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_alphabetic())
+        && characters.all(|character| character == '_' || character.is_alphanumeric())
 }
 
 fn qualify_callable(name: &str, kind: SymbolKind, container: Option<&str>) -> String {
@@ -228,6 +302,41 @@ mod tests {
         assert_eq!(
             SymbolNameAdapter::detect(OsStr::new("clangd"), Some("clangd")),
             SymbolNameAdapter::Standard
+        );
+    }
+
+    #[test]
+    fn detects_and_qualifies_pyrefly_methods() {
+        assert_eq!(
+            SymbolNameAdapter::detect(OsStr::new("/tools/pyrefly"), None),
+            SymbolNameAdapter::Pyrefly
+        );
+        assert_eq!(
+            SymbolNameAdapter::detect(OsStr::new("lsp-wrapper"), Some("pyrefly-lsp")),
+            SymbolNameAdapter::Pyrefly
+        );
+
+        let adapter = SymbolNameAdapter::Pyrefly;
+        assert_eq!(
+            adapter.workspace_symbol("run", SymbolKind::METHOD, Some("worker.Worker")),
+            "Worker.run"
+        );
+        assert_eq!(
+            adapter.call_hierarchy_item("run", SymbolKind::METHOD, Some("worker.Worker.run"), None),
+            "Worker.run"
+        );
+        assert_eq!(
+            adapter.call_hierarchy_item("run", SymbolKind::FUNCTION, Some("worker.run"), None),
+            "run"
+        );
+        assert_eq!(
+            adapter.call_hierarchy_item(
+                "run",
+                SymbolKind::METHOD,
+                Some("/workspace/worker.py"),
+                None
+            ),
+            "run"
         );
     }
 

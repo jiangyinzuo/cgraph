@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
         None => env::current_dir().context("failed to determine current directory")?,
     };
 
-    let lsp = LspProvider::start(LspConfig::new(program, workspace_root)).await?;
+    let lsp = LspProvider::start(LspConfig::for_server(program, workspace_root)).await?;
     tokio::time::sleep(Duration::from_secs(2)).await;
     let symbols = lsp.workspace_symbols(&query).await?;
 

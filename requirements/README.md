@@ -46,7 +46,7 @@
 | [REQ-5 符号与图入口管理](REQ-5-symbol-management/README.md) | `Implemented` | `P0` | 5 | 搜索、新增、重定位与取消图入口 |
 | [REQ-6 进程间通信](REQ-6-ipc/README.md) | `Implemented` | `P2` | 2 | 节点跳转编辑器与外部 anchor 聚焦 |
 | [REQ-7 导出关系图](REQ-7-export/README.md) | `Implemented` | `P2` | 0 | 简洁、稳定且不覆盖已有文件的文本导出 |
-| [REQ-8 语言支持](REQ-8-language-support/README.md) | `Implemented` | `P1` | 0 | Rust、C/C++ 和 Python 后端支持 |
+| [REQ-8 语言支持](REQ-8-language-support/README.md) | `Implemented` | `P1` | 1 | Rust、C/C++ 和 Python 后端支持，Python 默认使用 Pyrefly |
 | [REQ-9 项目本地配置与符号过滤](REQ-9-project-configuration/README.md) | `Implemented` | `P1` | 2 | `.cgraph.toml`、限定名过滤和会话内编辑重载 |
 
 `Partial` 只用于已经存在部分用户可观察行为的需求。领域类型、协议结构或占位类等内部骨架应记录为实现准备，但不能据此把 `Planned` 改成 `Partial`。

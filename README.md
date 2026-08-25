@@ -38,7 +38,7 @@ cargo run -- --ipc-socket "$XDG_RUNTIME_DIR/cgraph/project.sock"
 
 ## LSP 配置
 
-`cgraph` 会从工作区的项目文件推断 `rust-analyzer`、`clangd` 或 `pylsp`。自动检测不适合复杂的多语言仓库时，可以使用：
+`cgraph` 会从工作区的项目文件推断 `rust-analyzer`、`clangd` 或 Pyrefly；Python 默认启动 `pyrefly lsp`。自动检测不适合复杂的多语言仓库时，可以使用：
 
 ```bash
 cgraph --lsp clangd --lsp-arg=--background-index --workspace /path/to/project

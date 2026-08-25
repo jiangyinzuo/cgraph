@@ -152,7 +152,7 @@ fn lsp_config(cli: &Cli) -> Option<LspConfig> {
         .lsp
         .clone()
         .or_else(|| detect_language_server(&cli.workspace))?;
-    Some(LspConfig::new(program, &cli.workspace).args(cli.lsp_args.clone()))
+    Some(LspConfig::for_server(program, &cli.workspace).args(cli.lsp_args.clone()))
 }
 
 fn detect_language_server(workspace: &Path) -> Option<OsString> {
@@ -168,11 +168,12 @@ fn detect_language_server(workspace: &Path) -> Option<OsString> {
         return Some(OsString::from("clangd"));
     }
     if workspace.join("pyproject.toml").is_file()
+        || workspace.join("pyrefly.toml").is_file()
         || workspace.join("setup.py").is_file()
         || workspace.join("requirements.txt").is_file()
         || contains_source_with_extension(workspace, &["py"])
     {
-        return Some(OsString::from("pylsp"));
+        return Some(OsString::from("pyrefly"));
     }
 
     None
@@ -205,7 +206,7 @@ mod tests {
     };
     use clap::Parser;
 
-    use super::start_tree_sitter_fallback;
+    use super::{lsp_config, start_tree_sitter_fallback};
 
     #[tokio::test]
     async fn initializes_a_queryable_tree_sitter_fallback_and_reports_ready() {
@@ -264,6 +265,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["helper"]
         );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn selects_pyrefly_as_the_default_python_server_and_preserves_explicit_pylsp() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("cgraph-pyrefly-{unique}"));
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("pyrefly.toml"), "").unwrap();
+
+        let detected =
+            Cli::try_parse_from(["cgraph", "--workspace", workspace.to_str().unwrap()]).unwrap();
+        let detected = lsp_config(&detected).unwrap();
+        assert_eq!(detected.program, "pyrefly");
+        assert_eq!(detected.args, ["lsp"].map(std::ffi::OsString::from));
+
+        let explicit = Cli::try_parse_from([
+            "cgraph",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--lsp",
+            "pylsp",
+        ])
+        .unwrap();
+        let explicit = lsp_config(&explicit).unwrap();
+        assert_eq!(explicit.program, "pylsp");
+        assert!(explicit.args.is_empty());
+
         fs::remove_dir_all(workspace).unwrap();
     }
 }

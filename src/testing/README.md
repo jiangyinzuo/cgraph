@@ -16,7 +16,7 @@
 
 ## 自动化清单
 
-当前共有 **107 个自动化测试**，其中 106 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
+当前共有 **113 个自动化测试**，其中 112 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
 
 <!-- test-inventory
 src/app.rs: 17
@@ -25,21 +25,21 @@ src/app/save.rs: 1
 src/cli.rs: 4
 src/config/mod.rs: 2
 src/export/mod.rs: 3
-src/fetch/lsp.rs: 11
-src/fetch/lsp/symbol_names.rs: 4
+src/fetch/lsp.rs: 14
+src/fetch/lsp/symbol_names.rs: 5
 src/fetch/treesitter.rs: 9
 src/ipc/tests.rs: 5
 src/ipc/protocol.rs: 2
-src/main.rs: 1
+src/main.rs: 2
 src/state/graph.rs: 9
 src/tui/canvas/connections.rs: 4
 src/tui/config_editor.rs: 2
 src/tui/help.rs: 1
-src/tui/mod.rs: 27
+src/tui/mod.rs: 28
 src/tui/save.rs: 2
 src/tui/search.rs: 1
 tests/test_documentation.rs: 1
-total: 107
+total: 113
 -->
 
 | 位置 | 数量 | 类型 | 主要覆盖 |
@@ -50,17 +50,17 @@ total: 107
 | `src/cli.rs` | 4 | 解析测试 | call 子命令、空画布、LSP 参数位置、IPC socket 路径 |
 | `src/config/mod.rs` | 2 | 配置与匹配单元测试 | 缺省加载、严格 TOML、模式规范化、大小写和 `*` 通配符 |
 | `src/export/mod.rs` | 3 | 序列化与文件系统测试 | 稳定人类可读格式、共享节点/循环、空路径、安全创建与禁止覆盖 |
-| `src/fetch/lsp.rs` | 11 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、call/type hierarchy、取消、进度、安全限制、UTF-16 position 协商 |
-| `src/fetch/lsp/symbol_names.rs` | 4 | LSP 方言适配单元测试 | server 识别、Rust inherent/trait impl 限定名、非法 detail 降级、通用协议边界 |
+| `src/fetch/lsp.rs` | 14 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、call/type hierarchy、Pyrefly 命令与 Python 根解析、取消、进度、安全限制、UTF-16 position 协商，以及条件执行的真实 Pyrefly/rust-analyzer 最小工作区 |
+| `src/fetch/lsp/symbol_names.rs` | 5 | LSP 方言适配单元测试 | server 识别、Rust inherent/trait impl、Pyrefly 点号限定名、非法 detail 降级、通用协议边界 |
 | `src/fetch/treesitter.rs` | 9 | 文件系统与静态索引集成测试 | 语言检测、四种 grammar、Rust/Python/C/C++ 符号与调用、Rust/C++/Python 类型关系、限定方法名、UTF-16 列归一化、目录排除、歧义拒绝和取消安全的单次索引 |
 | `src/ipc/tests.rs` | 5 | Unix socket 异步集成测试 | 私有父目录、`0600` 权限、多客户端广播、请求路由与相同 request id 响应、版本拒绝、1 MiB 入站限制、陈旧 socket 回收和 inode 保护 |
 | `src/ipc/protocol.rs` | 2 | 序列化契约测试 | 版本化 tagged request、无 request id 的 UTF-16 零基打开位置事件 |
-| `src/main.rs` | 1 | 组装/降级测试 | Tree-sitter fallback 与统一状态 |
+| `src/main.rs` | 2 | 组装/降级测试 | Python 默认 Pyrefly、显式 pylsp 覆盖、Tree-sitter fallback 与统一状态 |
 | `src/state/graph.rs` | 9 | 图领域模型单元测试 | 菱形全局去重、双向边观察、循环、自环、身份解析、边迁移、共享边清除、可见/已知图投影 |
 | `src/tui/canvas/connections.rs` | 4 | 连线几何与渲染单元测试 | 正交圆角、真实普通交叉高亮、单/双线 `╪` / `╫` 轴向语义、极远线段先裁剪后栅格化 |
 | `src/tui/config_editor.rs` | 2 | 外部进程与选择单元测试 | `$EDITER` 优先、`$EDITOR` 回退、缺失诊断、真实子进程收到准确配置路径和最小模板 |
 | `src/tui/help.rs` | 1 | 帮助输入与渲染集成测试 | Shift-`?`、完整内容、Canvas 拦截、键鼠滚动、小终端裁剪、关闭和状态稳定 |
-| `src/tui/mod.rs` | 27 | 输入、布局和渲染组件测试 | 键鼠映射、`ec` 前缀、精简 footer、保存、IPC、位置锚定、刷新、拖拽/裁剪、空间导航、布局、连线和终端缓冲区 |
+| `src/tui/mod.rs` | 28 | 输入、布局和渲染组件测试 | 键鼠映射、`ec` 前缀、精简 footer、无边框画布标题与选中 URI、保存、IPC、位置锚定、刷新、拖拽/裁剪、空间导航、布局、连线和终端缓冲区 |
 | `src/tui/save.rs` | 2 | 保存弹窗组件测试 | 已有目标保持不变并显示错误、成功写入并显示路径 |
 | `src/tui/search.rs` | 1 | 搜索展示单元测试 | Rust/C++ `::` 与 Python `.` 限定名不重复追加 container 标签 |
 | `tests/test_documentation.rs` | 1 | 仓库一致性测试 | 本清单与测试注解逐文件一致 |
@@ -107,7 +107,7 @@ LSP 测试使用 `tokio::io::duplex` 连接真实 `JsonRpcClient` actor 与测�
 - future 被 abort 后发送 `$/cancelRequest`。
 - 非法超大消息在分配前被拒绝。
 
-模拟 server 让协议测试稳定、快速且不依赖本机工具链。真实 rust-analyzer、clangd 和 pylsp 目前属于手工诊断边界，不作为普通单元测试的成功条件。
+模拟 server 仍是稳定、快速且不依赖本机工具链的主要协议测试。另有两个条件执行的真实 server 测试：`pyrefly` 位于 `PATH` 时验证 `pyrefly lsp`、受控 `didOpen` 索引引导、workspace symbol、incoming call hierarchy 和 `Worker.run` 名称；`rust-analyzer` 位于 `PATH` 时验证最小 Cargo workspace、workspace symbol 和 outgoing call hierarchy，并在索引尚未稳定而返回 `content modified` 时于总超时内重试。对应命令不存在或 `--version` 失败时，测试打印跳过原因并返回，不让缺少可选开发工具的普通 CI 失败。
 
 ### Tree-sitter 静态索引测试
 
@@ -166,7 +166,8 @@ Ratatui `TestBackend` 提供虚拟终端 Buffer。测试调用完整 `render()`�
 - 端点方框完全离屏后，只要路径仍穿过 viewport，屏内线段与边界箭头继续渲染。
 - 节点顶部边框不包含 `call` / `type` 角标。
 - 终端容得下节点时，动态宽度方框不会截断完整的 `Class::method`。
-- 快捷键提示与分析状态出现在同一条最底行，状态不会残留在画布区域。
+- 画布不再绘制最外层边框；左上角默认显示 `CALL GRAPH`，选中带精确位置的节点后显示其文件 URI。
+- 快捷键提示与分析状态连续出现在同一条最底行，状态不会残留在画布区域，也不再为状态固定预留右侧宽度。
 - 默认 footer 只保留高频入口并提示 `?`，不再常驻显示 `w`、`dd/dp/dn` 等低频命令。
 - 完整帮助 modal 在足够高的终端中显示所有分组和 `ec`，滚动状态不影响底层画布。
 
@@ -219,11 +220,9 @@ CLI 测试使用 Clap `try_parse_from`，IPC 协议测试检查 request 与 even
 
 以下内容尚未自动覆盖。新增对应测试后，应在同一个变更中更新本节和自动化清单。
 
-### 真实语言服务器自动化测试
+### 真实语言服务器覆盖缺口
 
-CI 当前不会真正启动 rust-analyzer、clangd 或 pylsp。冷索引、工具版本、后台文件变化和 `content modified` 会带来时间与稳定性问题。现阶段使用内存协议 server，并提供 `examples/lsp_workspace_symbols.rs` 和 `examples/lsp_hierarchy.rs` 手工诊断。
-
-后续可以增加带固定最小 fixture、固定 server 版本、显式超时和 capability 检查的可选测试组；它不应默认拖慢普通 `cargo test`。
+当前已有条件执行的 Pyrefly 与 rust-analyzer 最小集成测试，并保留 `examples/lsp_workspace_symbols.rs` 和 `examples/lsp_hierarchy.rs` 供手工诊断。仍未自动覆盖 clangd、pylsp、固定 server 版本矩阵、冷/热索引性能、后台文件变化和 `content modified`。这些场景容易受工具版本与机器性能影响，后续应放入显式可选的测试组，不让普通正确性测试产生不稳定的时间门槛。
 
 ### 完整 PTY 端到端测试
 

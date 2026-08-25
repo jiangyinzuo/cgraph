@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         None => None,
     };
 
-    let lsp = LspProvider::start(LspConfig::new(program, workspace_root)).await?;
+    let lsp = LspProvider::start(LspConfig::for_server(program, workspace_root)).await?;
     tokio::time::sleep(Duration::from_secs(12)).await;
     let response = lsp
         .hierarchy_client()

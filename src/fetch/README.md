@@ -6,11 +6,11 @@ Fetch 层负责从外部分析能力获得符号和层次关系，再归一化�
 
 rust-analyzer 的进程模型、冷索引原因与未来复用路线单独记录在 [rust-analyzer 生命周期与索引复用设计](rust-analyzer.md)，避免把语言专用取舍混入通用 LSP actor 说明。
 
-不同语言服务器的符号展示字段不能用同一套启发式解释。workspace symbol 与 call hierarchy 的命名边界、适配器选择及 Rust `类型名::方法名` 规则记录在 [LSP 符号命名适配](lsp/README.md)。
+不同语言服务器的符号展示字段不能用同一套启发式解释。workspace symbol 与 call hierarchy 的命名边界、适配器选择、Rust `类型名::方法名` 和 Pyrefly `Class.method` 规则记录在 [LSP 符号命名适配](lsp/README.md)。
 
 ## Provider 与 Client Handle
 
-`LspProvider` 拥有语言服务器子进程、连接任务和关闭流程，不能克隆。LSP 专用 client 只持有 JSON-RPC actor 的发送端和 canonical workspace root；`TreeSitterProvider` 拥有 grammar/query readiness 和共享的 single-flight 项目索引状态。Fetch 顶层的 `WorkspaceSymbolClient` / `HierarchyClient` 枚举把两种实现收敛为可克隆的窄接口，TUI 不判断 provider 类型。
+`LspProvider` 拥有语言服务器子进程、连接任务和关闭流程，不能克隆。`LspConfig::for_server` 把已知可执行文件转换为实际 stdio 命令；大多数 server 不加参数，Pyrefly 自动增加 `lsp` 子命令，再追加用户参数。LSP 专用 client 只持有 JSON-RPC actor 的发送端和 canonical workspace root；`TreeSitterProvider` 拥有 grammar/query readiness 和共享的 single-flight 项目索引状态。Fetch 顶层的 `WorkspaceSymbolClient` / `HierarchyClient` 枚举把两种实现收敛为可克隆的窄接口，TUI 不判断 provider 类型。
 
 这样设计有两个原因：
 
