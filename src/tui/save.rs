@@ -140,6 +140,7 @@ mod tests {
         assert!(app.save.is_none());
         let notice = format!("Saved graph to {}", target.display());
         assert_eq!(app.canvas_notice.as_deref(), Some(notice.as_str()));
+        assert_eq!(app.message_history.last(), Some(&notice));
         let written = fs::read_to_string(&target).unwrap();
         assert!(written.starts_with("cgraph graph · text v1"));
         assert!(written.contains("[1] call  root  [anchor]"));

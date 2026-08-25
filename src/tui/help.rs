@@ -38,6 +38,7 @@ const HELP_ROWS: &[(&str, &str)] = &[
         "ec",
         "edit .cgraph.toml, reload it, and refresh loaded branches",
     ),
+    ("g<", "open the bottom-aligned message-history pager"),
     ("w", "open the graph save dialog"),
     ("q / Esc", "quit cgraph"),
     ("", ""),
@@ -65,6 +66,20 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("Home / End", "jump to the first / last help row"),
     ("mouse wheel", "scroll help"),
     ("? / q / Esc", "close help without quitting cgraph"),
+    ("", ""),
+    ("Message pager", ""),
+    ("j / k, Up / Down", "scroll one wrapped row"),
+    ("Space / f / PageDown", "scroll one page down"),
+    ("b / PageUp", "scroll one page up"),
+    ("Ctrl-d / Ctrl-u", "scroll half a page down / up"),
+    ("g / G, Home / End", "jump to the first / last message"),
+    ("V", "start or cancel wrapped-line selection"),
+    ("y", "copy the selected original text through OSC 52"),
+    (
+        "mouse drag",
+        "select with the terminal, then use its normal copy command",
+    ),
+    ("q / Esc", "close the message pager"),
 ];
 
 pub(super) fn handle_key(app: &mut App, key: KeyEvent) {
@@ -230,8 +245,8 @@ mod tests {
                 output
             },
         );
-        assert!(small_content.contains("mouse wheel"));
-        assert!(small_content.contains("close help"));
+        assert!(small_content.contains("mouse drag"));
+        assert!(small_content.contains("close the message pager"));
         handle_event(
             &mut app,
             Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT)),

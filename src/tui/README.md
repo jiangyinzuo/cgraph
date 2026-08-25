@@ -12,8 +12,9 @@ TUI 层把终端事件转换为 App 状态迁移，并把 App 渲染为 Ratatui 
 
 - Canvas 模式：`a` 后接 `c` / `t` 打开 call/type 搜索框；`t` 后接 `l` / `r` 独立 toggle；`e` 后接 `c` 编辑并重载配置；裸 `r` 刷新当前节点；`w` 保存；`?` 打开帮助；`dd` / `dp` / `dn` 管理入口和分支；`q` 或 `Esc` 退出。
 - Search modal 模式：普通字符编辑查询，方向键或 `Ctrl-n` / `Ctrl-p` 选择，回车确认，`Esc` 关闭。
-- Save modal 模式：普通字符和 Backspace 编辑路径，回车尝试安全创建目标，`Esc` 关闭；写入失败保留弹窗和错误，成功后关闭并把路径写入 footer notice。
+- Save modal 模式：普通字符和 Backspace 编辑路径，回车尝试安全创建目标，`Esc` 关闭；写入失败保留弹窗和错误，成功后关闭并把路径写入统一消息历史。
 - Help modal 模式：方向键、`j`/`k`、PageUp/PageDown、Home/End 或鼠标滚轮查看完整清单；`?`、`q`、`Esc` 只关闭帮助。帮助事件优先于 Canvas 分发，防止低层命令透传。
+- Message pager 模式：最新信息或错误显示在倒数第二行；按 `g<` 从该行向上打开最多 15 行的 pager，支持滚动、`V` 行选择、`y` OSC 52 复制，`q`/`Esc` 关闭，最底行 footer 始终保留。
 
 鼠标移动用于更新高亮，左键确认，滚轮移动选择。鼠标命中必须使用与渲染相同的 layout 函数，否则终端 resize 后视觉位置和点击位置会不一致。
 
@@ -30,9 +31,17 @@ LSP $/progress / experimental/serverStatus
 
 分析状态和搜索状态必须分开：`AnalysisStatus::Working` 表示 server 报告的全局后台任务，`SearchStatus::Loading` 只表示当前 `workspace/symbol` 已发送。将两者合并会在索引期间隐藏搜索完成状态，也会把一次慢查询误写成整个连接不可用。
 
-footer 固定为一行，快捷键提示后紧接分隔符和 `backend · phase [percentage] · message` 状态摘要。它们使用同一个 `Paragraph` 和完整底栏宽度，避免在小终端中为状态固定预留 2/5 的空白区域；终端不足时由统一行自然裁剪。LSP、Tree-sitter、phase 和消息使用不同颜色，但文本本身必须足以表达状态，不能只依赖颜色。
+footer 固定为最底部一行，快捷键提示后紧接分隔符和 `backend · phase [percentage] · message` 状态摘要。它们使用同一个 `Paragraph` 和完整底栏宽度，避免在小终端中为状态固定预留比例空白；终端不足时由统一行自然裁剪。LSP、Tree-sitter、phase 和状态详情使用不同颜色，但文本本身必须足以表达状态，不能只依赖颜色。
 
-默认左侧只显示 `?`、添加、展开、移动和退出等高频入口。完整命令由帮助层维护；前缀等待时 footer 仍临时显示合法后缀，错误和最近操作 notice 仍优先于默认提示。帮助清单和生产键位在同一 TUI 模块维护，新增快捷键时必须同步其测试与用户文档。
+默认左侧只显示 `?`、添加、展开、移动和退出等高频入口。完整命令由帮助层维护；前缀等待时 footer 临时显示合法后缀。任何消息都不能替换该行：App 的保存、配置、IPC、查询结果和分析错误统一通过 `set_canvas_notice` / `set_canvas_error` 写入历史，并在独立的倒数第二行显示最新摘要。帮助清单和生产键位在同一 TUI 模块维护，新增快捷键时必须同步其测试与用户文档。
+
+## Message pager
+
+消息 pager 位于 `messages.rs`。普通信息、后端状态错误、workspace symbol 错误和 hierarchy 错误都先由 App 记录到统一历史；pager 只维护原始文本、垂直 offset、换行后的总行数、viewport 高度和可选行选择，不包含插入模式、编辑历史、寄存器或宏录制状态。渲染直接组合 Ratatui `Paragraph`、`Scrollbar`、`Block` 和 `Clear`，因此不会修改消息历史或工作区文件，也不依赖完整文本编辑器组件。
+
+文本按 Unicode 显示宽度硬换行，offset 对换行后的屏幕行生效；打开时定位到最新消息，用户向上浏览后保持当前位置，回到底部后继续跟随新增消息。`j/k` 与方向键移动一行，`Space/f/b/PageUp/PageDown` 移动一页，`Ctrl-d/u` 移动半页，`g/G/Home/End` 跳转首尾。`V` 从当前活动屏幕行开始或取消 line selection，移动键扩展选择，`y` 按原始 source byte range 复制，软换行不会被错误写成真实换行；输出使用 Crossterm OSC 52。pager 的区域永远止于最底行之上，因此 footer 在打开期间仍可见。
+
+鼠标复制刻意交给终端：进入 pager 后事件循环发送 `DisableMouseCapture`，普通拖拽由本地终端、SSH 或 tmux 解释；关闭 pager 后发送 `EnableMouseCapture`，恢复 Canvas 点击和拖拽。键盘 `y` 则通过 Crossterm 的 OSC 52 命令复制，不引入 X11、Wayland、macOS 或 Windows 专用 clipboard crate；终端或 tmux 禁用 OSC 52 时会在 pager title 显示失败。鼠标捕获切换不退出 raw mode 或备用屏幕。
 
 ## 外部编辑器生命周期
 
@@ -40,13 +49,13 @@ footer 固定为一行，快捷键提示后紧接分隔符和 `backend · phase 
 
 只有零退出状态才调用严格 `ProjectConfig::load`。成功后 `App::reload_symbol_filter` 为 `known_graph` 中所有 `Loaded` / `Loading` 分支生成 `CachePolicy::Refresh` 请求；成功空缓存也必须刷新，才能在放宽过滤规则后发现新关系。新 request id 会拒绝编辑期间排队的旧结果。外部编辑器 I/O 不进入 App，配置 loader 不依赖终端，图刷新也不依赖进程 API。
 
-Tree-sitter fallback 在 `main` 中完成语言检测和 grammar/query 初始化，通过同一个通用状态入口报告 working、ready 和 error；TUI 不解释 Tree-sitter API。第一次搜索或展开的索引时间体现在对应 modal/branch 的 loading 状态，Tree-sitter hierarchy 成功后的语法级置信度由 App 写入 footer notice。
+Tree-sitter fallback 在 `main` 中完成语言检测和 grammar/query 初始化，通过同一个通用状态入口报告 working、ready 和 error；TUI 不解释 Tree-sitter API。第一次搜索或展开的索引时间体现在对应 modal/branch 的 loading 状态，Tree-sitter hierarchy 成功后的语法级置信度由 App 写入消息摘要与历史。
 
 ## IPC command 编排
 
 TUI 接收可选的 `IpcCommand` receiver，并在每轮 render 前 drain 已到达请求。每条 `focus_symbol` 都先转换为公共 `SymbolIdentity`，再调用 UI 无关的 `App::focus_symbol`；成功/失败映射为同 request id 的 `accepted` / `error`，由随命令携带的 responder 返回原客户端。TUI 不读取原始 JSON、不持有 Unix stream，也不让 socket task 直接修改 widget 或 `RelationGraph`。
 
-外部聚焦成功会按产品语义选择、固定并居中目标，和用户接受搜索结果一致；它不会自动创建 hierarchy task。响应发送失败只写 footer notice，不能终止事件循环。command channel 与每客户端 writer queue 都有界，事件循环只做同步状态迁移，不等待 socket 写 I/O。
+外部聚焦成功会按产品语义选择、固定并居中目标，和用户接受搜索结果一致；它不会自动创建 hierarchy task。响应发送失败写入消息摘要与历史，不能终止事件循环。command channel 与每客户端 writer queue 都有界，事件循环只做同步状态迁移，不等待 socket 写 I/O。
 
 ## 同步事件循环与异步查询
 
@@ -95,7 +104,7 @@ workspace symbol 响应包含多种符号。TUI 当前根据公共候选中的 `
 
 拖拽手势状态由事件循环局部的 `CanvasDragState` 保存，而不是写入 App：左键按下节点主体或画布空白处时记录当前位置，后续每个 `Drag(Left)` 将相邻事件的坐标差累积到 viewport，因此内容和指针同向移动；松开左键、进入搜索 modal 或按下画布外区域都会清除锚点。左右 toggle 按钮在命中后明确不建立锚点，避免展开操作被解释成平移。拖拽节点表示移动观察窗口，不是修改单个节点的世界位置。
 
-同一局部状态还记录按下节点、是否发生拖拽和最近一次完整点击。只有同一 `NodeId` 在 500 ms 内完成两次 down/up 且两次都没有 drag，才生成 `OpenLocation` interaction；按钮、画布外释放、空白点击和拖拽会清除点击序列。TUI 只把精确 `SourceLocation` 交给可选 `IpcEventSender`，不直接持有 listener 或 client stream。发送失败转成 footer notice，不能让 IPC 故障退出 TUI。
+同一局部状态还记录按下节点、是否发生拖拽和最近一次完整点击。只有同一 `NodeId` 在 500 ms 内完成两次 down/up 且两次都没有 drag，才生成 `OpenLocation` interaction；按钮、画布外释放、空白点击和拖拽会清除点击序列。TUI 只把精确 `SourceLocation` 交给可选 `IpcEventSender`，不直接持有 listener 或 client stream。发送失败转成消息摘要并进入历史，不能让 IPC 故障退出 TUI。
 
 选择和 toggle 不能直接依赖“selection 位于世界原点”的布局结果，否则目标节点会突然跳到画布中心。控制器用 `with_stable_node_position` 在状态迁移前后读取操作节点的世界中心，并把差值反向累加到 viewport。鼠标选择、空间键盘导航、缓存 toggle、首次异步请求以及 hierarchy 完成事件都经过同一入口。锚点使用中心而不是左上角，是因为 CLI 临时符号在 prepare 后可能解析成长限定名并改变节点宽度；此时用户关注的视觉位置仍保持稳定。搜索接受结果是明确例外，它会重置 viewport，把新 anchor 放回中心。
 

@@ -12,7 +12,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -29,16 +29,16 @@ use tokio::{
 use tower_lsp::lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, ClientCapabilities, ClientInfo, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolClientCapabilities,
-    DocumentSymbolParams, DocumentSymbolResponse, GeneralClientCapabilities, InitializeParams,
-    InitializeResult, Location, NumberOrString, OneOf, PartialResultParams, Position,
-    PositionEncodingKind, ProgressParams, ProgressParamsValue, Range, ServerInfo,
-    SymbolInformation, SymbolKind, TextDocumentClientCapabilities, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, TypeHierarchyClientCapabilities,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, Url, WindowClientCapabilities, WorkDoneProgress,
-    WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
+    CallHierarchyPrepareParams, CallHierarchyServerCapability, ClientCapabilities, ClientInfo,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbol,
+    DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
+    GeneralClientCapabilities, InitializeParams, InitializeResult, Location, NumberOrString, OneOf,
+    PartialResultParams, Position, PositionEncodingKind, ProgressParams, ProgressParamsValue,
+    Range, ServerInfo, SymbolInformation, SymbolKind, TextDocumentClientCapabilities,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    TypeHierarchyClientCapabilities, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Url, WindowClientCapabilities,
+    WorkDoneProgress, WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
     WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
     request::{
         CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
@@ -187,9 +187,71 @@ pub struct HierarchyClient {
     workspace_root: PathBuf,
     symbol_names: SymbolNameAdapter,
     document_symbols: DocumentSymbolCache,
+    capabilities: Arc<ServerHierarchyCapabilities>,
 }
 
 type DocumentSymbolCache = Arc<Mutex<HashMap<Url, Arc<OnceCell<Vec<DocumentSymbolOwner>>>>>>;
+
+#[derive(Debug, Default)]
+struct ServerHierarchyCapabilities {
+    static_call: std::sync::atomic::AtomicBool,
+    dynamic_registrations: StdMutex<HashMap<String, String>>,
+}
+
+impl ServerHierarchyCapabilities {
+    fn set_static_call(&self, supported: bool) {
+        self.static_call
+            .store(supported, std::sync::atomic::Ordering::Release);
+    }
+
+    fn supports(&self, kind: HierarchyKind) -> bool {
+        if kind == HierarchyKind::Call
+            && self.static_call.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return true;
+        }
+        let method = prepare_hierarchy_method(kind);
+        self.dynamic_registrations
+            .lock()
+            .expect("LSP hierarchy capability mutex poisoned")
+            .values()
+            .any(|registered| registered == method)
+    }
+
+    fn register(&self, id: &str, method: &str) {
+        if is_hierarchy_registration(method) {
+            self.dynamic_registrations
+                .lock()
+                .expect("LSP hierarchy capability mutex poisoned")
+                .insert(id.to_owned(), method.to_owned());
+        }
+    }
+
+    fn unregister(&self, id: &str) {
+        self.dynamic_registrations
+            .lock()
+            .expect("LSP hierarchy capability mutex poisoned")
+            .remove(id);
+    }
+}
+
+fn hierarchy_name(kind: HierarchyKind) -> &'static str {
+    match kind {
+        HierarchyKind::Call => "call",
+        HierarchyKind::Type => "type",
+    }
+}
+
+fn prepare_hierarchy_method(kind: HierarchyKind) -> &'static str {
+    match kind {
+        HierarchyKind::Call => CallHierarchyPrepare::METHOD,
+        HierarchyKind::Type => TypeHierarchyPrepare::METHOD,
+    }
+}
+
+fn is_hierarchy_registration(method: &str) -> bool {
+    method == CallHierarchyPrepare::METHOD || method == TypeHierarchyPrepare::METHOD
+}
 
 impl fmt::Debug for HierarchyClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -201,6 +263,12 @@ impl fmt::Debug for HierarchyClient {
 
 impl HierarchyClient {
     pub async fn query(&self, mut query: HierarchyQuery) -> Result<HierarchyResponse> {
+        if !self.supports(query.symbol.kind) {
+            bail!(
+                "language server does not advertise {} hierarchy support",
+                hierarchy_name(query.symbol.kind)
+            );
+        }
         let (document_position, resolved_location) =
             self.resolve_document_position(&query.symbol).await?;
         query.symbol.location = Some(resolved_location);
@@ -220,6 +288,10 @@ impl HierarchyClient {
             children: deduplicate_identities(children),
             source: FetchSource::Lsp,
         })
+    }
+
+    pub fn supports(&self, kind: HierarchyKind) -> bool {
+        self.capabilities.supports(kind)
     }
 
     async fn resolve_document_position(
@@ -458,6 +530,7 @@ pub struct LspProvider {
     server_info: Option<ServerInfo>,
     symbol_names: SymbolNameAdapter,
     document_symbols: DocumentSymbolCache,
+    hierarchy_capabilities: Arc<ServerHierarchyCapabilities>,
     bootstrap_document: Option<Url>,
     status_receiver: Option<mpsc::UnboundedReceiver<LspStatusUpdate>>,
 }
@@ -518,7 +591,7 @@ impl LspProvider {
             .stdout
             .take()
             .context("language server did not expose stdout")?;
-        let (client, status_receiver, connection_task) = spawn_json_rpc(
+        let (client, status_receiver, connection_task, hierarchy_capabilities) = spawn_json_rpc(
             BufReader::new(stdout),
             stdin,
             workspace_uri.clone(),
@@ -556,6 +629,7 @@ impl LspProvider {
         if !workspace_symbol_supported(&initialize_result) {
             bail!("language server does not support workspace/symbol");
         }
+        hierarchy_capabilities.set_static_call(call_hierarchy_supported(&initialize_result));
 
         client
             .notify("initialized", json!({}))
@@ -601,6 +675,7 @@ impl LspProvider {
             server_info: initialize_result.server_info,
             symbol_names,
             document_symbols: Arc::new(Mutex::new(HashMap::new())),
+            hierarchy_capabilities,
             bootstrap_document,
             status_receiver: Some(status_receiver),
         })
@@ -634,6 +709,7 @@ impl LspProvider {
             workspace_root: self.workspace_root.clone(),
             symbol_names: self.symbol_names,
             document_symbols: Arc::clone(&self.document_symbols),
+            capabilities: Arc::clone(&self.hierarchy_capabilities),
         }
     }
 
@@ -681,9 +757,13 @@ impl LspProvider {
 fn client_capabilities() -> ClientCapabilities {
     ClientCapabilities {
         text_document: Some(TextDocumentClientCapabilities {
-            call_hierarchy: Some(CallHierarchyClientCapabilities::default()),
+            call_hierarchy: Some(CallHierarchyClientCapabilities {
+                dynamic_registration: Some(true),
+            }),
             document_symbol: Some(DocumentSymbolClientCapabilities::default()),
-            type_hierarchy: Some(TypeHierarchyClientCapabilities::default()),
+            type_hierarchy: Some(TypeHierarchyClientCapabilities {
+                dynamic_registration: Some(true),
+            }),
             ..TextDocumentClientCapabilities::default()
         }),
         workspace: Some(WorkspaceClientCapabilities {
@@ -821,6 +901,7 @@ fn spawn_json_rpc<R, W>(
     JsonRpcClient,
     mpsc::UnboundedReceiver<LspStatusUpdate>,
     JoinHandle<Result<()>>,
+    Arc<ServerHierarchyCapabilities>,
 )
 where
     R: AsyncBufRead + Send + Unpin + 'static,
@@ -834,7 +915,14 @@ where
     let (cancellation_sender, cancellation_receiver) = mpsc::unbounded_channel();
     let (status_sender, status_receiver) = mpsc::unbounded_channel();
     let (incoming_sender, incoming_receiver) = mpsc::channel(64);
+    let hierarchy_capabilities = Arc::new(ServerHierarchyCapabilities::default());
     let reader_task = tokio::spawn(read_messages(reader, incoming_sender));
+    let actor_hierarchy_capabilities = Arc::clone(&hierarchy_capabilities);
+    let server_context = LspServerContext {
+        workspace_uri,
+        workspace_name,
+        hierarchy_capabilities: actor_hierarchy_capabilities,
+    };
     let connection_task = tokio::spawn(async move {
         let result = run_json_rpc(
             writer,
@@ -842,8 +930,7 @@ where
             cancellation_receiver,
             incoming_receiver,
             status_sender,
-            workspace_uri,
-            workspace_name,
+            server_context,
         )
         .await;
         reader_task.abort();
@@ -855,7 +942,18 @@ where
         commands: command_sender,
         cancellations: cancellation_sender,
     };
-    (client, status_receiver, connection_task)
+    (
+        client,
+        status_receiver,
+        connection_task,
+        hierarchy_capabilities,
+    )
+}
+
+struct LspServerContext {
+    workspace_uri: Url,
+    workspace_name: String,
+    hierarchy_capabilities: Arc<ServerHierarchyCapabilities>,
 }
 
 async fn read_messages<R>(mut reader: R, sender: mpsc::Sender<std::result::Result<Value, String>>)
@@ -883,8 +981,7 @@ async fn run_json_rpc<W>(
     mut cancellations: mpsc::UnboundedReceiver<u64>,
     mut incoming: mpsc::Receiver<std::result::Result<Value, String>>,
     status_sender: mpsc::UnboundedSender<LspStatusUpdate>,
-    workspace_uri: Url,
-    workspace_name: String,
+    server_context: LspServerContext,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -973,8 +1070,9 @@ where
                     if let Err(error) = handle_server_message(
                             &mut writer,
                             &message,
-                            &workspace_uri,
-                            &workspace_name,
+                            &server_context.workspace_uri,
+                            &server_context.workspace_name,
+                            &server_context.hierarchy_capabilities,
                         )
                         .await
                     {
@@ -1146,6 +1244,7 @@ async fn handle_server_message<W>(
     message: &Value,
     workspace_uri: &Url,
     workspace_name: &str,
+    hierarchy_capabilities: &ServerHierarchyCapabilities,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -1186,10 +1285,23 @@ where
                 "name": workspace_name,
             }],
         }),
-        "client/registerCapability"
-        | "client/unregisterCapability"
-        | "window/workDoneProgress/create"
-        | "window/showMessageRequest" => json!({
+        "client/registerCapability" => {
+            register_hierarchy_capabilities(message, hierarchy_capabilities);
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": null,
+            })
+        }
+        "client/unregisterCapability" => {
+            unregister_hierarchy_capabilities(message, hierarchy_capabilities);
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": null,
+            })
+        }
+        "window/workDoneProgress/create" | "window/showMessageRequest" => json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": null,
@@ -1205,6 +1317,39 @@ where
     };
 
     write_message(writer, &response).await
+}
+
+fn register_hierarchy_capabilities(message: &Value, capabilities: &ServerHierarchyCapabilities) {
+    let Some(registrations) = message
+        .pointer("/params/registrations")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for registration in registrations {
+        let Some(id) = registration.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(method) = registration.get("method").and_then(Value::as_str) else {
+            continue;
+        };
+        capabilities.register(id, method);
+    }
+}
+
+fn unregister_hierarchy_capabilities(message: &Value, capabilities: &ServerHierarchyCapabilities) {
+    let Some(unregistrations) = message
+        .pointer("/params/unregistrations")
+        .or_else(|| message.pointer("/params/unregisterations"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for unregistration in unregistrations {
+        if let Some(id) = unregistration.get("id").and_then(Value::as_str) {
+            capabilities.unregister(id);
+        }
+    }
 }
 
 fn requested_configuration(section: Option<&str>) -> Value {
@@ -1258,6 +1403,14 @@ fn workspace_symbol_supported(initialize_result: &InitializeResult) -> bool {
     match &initialize_result.capabilities.workspace_symbol_provider {
         Some(OneOf::Left(supported)) => *supported,
         Some(OneOf::Right(_)) => true,
+        None => false,
+    }
+}
+
+fn call_hierarchy_supported(initialize_result: &InitializeResult) -> bool {
+    match initialize_result.capabilities.call_hierarchy_provider {
+        Some(CallHierarchyServerCapability::Simple(supported)) => supported,
+        Some(CallHierarchyServerCapability::Options(_)) => true,
         None => false,
     }
 }
@@ -1600,6 +1753,7 @@ mod tests {
         ffi::OsStr,
         fs,
         path::{Path, PathBuf},
+        sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -1619,8 +1773,9 @@ mod tests {
         symbol_belongs_to_workspace, symbol_leaf_name, uses_utf16_positions,
         workspace_symbol_initialization_options, write_message,
     };
+    use crate::fetch::treesitter::{TreeSitterLanguage, TreeSitterProvider};
     use crate::{
-        fetch::{FetchSource, HierarchyQuery},
+        fetch::{FetchSource, HierarchyClient as FetchHierarchyClient, HierarchyQuery},
         state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
     };
 
@@ -1708,6 +1863,14 @@ mod tests {
             capabilities["general"]["positionEncodings"],
             json!(["utf-16"])
         );
+        assert_eq!(
+            capabilities["textDocument"]["callHierarchy"]["dynamicRegistration"],
+            json!(true)
+        );
+        assert_eq!(
+            capabilities["textDocument"]["typeHierarchy"]["dynamicRegistration"],
+            json!(true)
+        );
         assert!(uses_utf16_positions(None));
         assert!(uses_utf16_positions(Some(
             &tower_lsp::lsp_types::PositionEncodingKind::UTF16
@@ -1732,17 +1895,19 @@ mod tests {
         let (client_reader, client_writer) = split(client_stream);
         let (server_reader, mut server_writer) = split(server_stream);
         let workspace_uri = Url::parse("file:///workspace").unwrap();
-        let (rpc_client, _status_receiver, connection_task) = spawn_json_rpc(
+        let (rpc_client, _status_receiver, connection_task, capabilities) = spawn_json_rpc(
             BufReader::new(client_reader),
             client_writer,
             workspace_uri,
             "workspace".to_owned(),
         );
+        capabilities.set_static_call(true);
         let hierarchy_client = HierarchyClient {
             client: rpc_client.clone(),
             workspace_root: PathBuf::from("/workspace"),
             symbol_names: SymbolNameAdapter::RustAnalyzer,
             document_symbols: Default::default(),
+            capabilities,
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -1842,17 +2007,39 @@ mod tests {
         let (client_reader, client_writer) = split(client_stream);
         let (server_reader, mut server_writer) = split(server_stream);
         let workspace_uri = Url::parse("file:///workspace").unwrap();
-        let (rpc_client, _status_receiver, connection_task) = spawn_json_rpc(
+        let (rpc_client, _status_receiver, connection_task, capabilities) = spawn_json_rpc(
             BufReader::new(client_reader),
             client_writer,
             workspace_uri,
             "workspace".to_owned(),
         );
+        let mut server_reader = BufReader::new(server_reader);
+        write_message(
+            &mut server_writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "register-type-hierarchy",
+                "method": "client/registerCapability",
+                "params": {
+                    "registrations": [{
+                        "id": "type-hierarchy",
+                        "method": "textDocument/prepareTypeHierarchy",
+                        "registerOptions": {}
+                    }]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let registration = read_message(&mut server_reader).await.unwrap();
+        assert_eq!(registration["id"], "register-type-hierarchy");
+        assert!(capabilities.supports(HierarchyKind::Type));
         let hierarchy_client = HierarchyClient {
             client: rpc_client.clone(),
             workspace_root: PathBuf::from("/workspace"),
             symbol_names: SymbolNameAdapter::Standard,
             document_symbols: Default::default(),
+            capabilities: Arc::clone(&capabilities),
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -1867,8 +2054,6 @@ mod tests {
             direction: HierarchyDirection::Incoming,
         };
         let client_task = tokio::spawn(async move { hierarchy_client.query(query).await.unwrap() });
-        let mut server_reader = BufReader::new(server_reader);
-
         let prepare = read_message(&mut server_reader).await.unwrap();
         assert_eq!(prepare["method"], "textDocument/prepareTypeHierarchy");
         write_message(
@@ -1900,9 +2085,108 @@ mod tests {
         assert_eq!(response.children[0].symbol, "Parent");
         assert_eq!(response.children[0].kind, HierarchyKind::Type);
 
+        write_message(
+            &mut server_writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": "unregister-type-hierarchy",
+                "method": "client/unregisterCapability",
+                "params": {
+                    "unregistrations": [{
+                        "id": "type-hierarchy",
+                        "method": "textDocument/prepareTypeHierarchy"
+                    }]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let unregistration = read_message(&mut server_reader).await.unwrap();
+        assert_eq!(unregistration["id"], "unregister-type-hierarchy");
+        assert!(!capabilities.supports(HierarchyKind::Type));
+
         drop(rpc_client);
         connection_task.abort();
         let _ = connection_task.await;
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_tree_sitter_for_unregistered_type_hierarchy() {
+        let workspace = external_server_workspace("type-fallback");
+        fs::write(
+            workspace.join("lib.rs"),
+            "trait Command {}\nstruct Cli;\nimpl Command for Cli {}\n",
+        )
+        .unwrap();
+        let tree_sitter = TreeSitterProvider::start(&workspace, TreeSitterLanguage::Rust).unwrap();
+        let symbols = tree_sitter
+            .workspace_symbol_client()
+            .query("")
+            .await
+            .unwrap();
+        let cli = symbols.iter().find(|symbol| symbol.name == "Cli").unwrap();
+        let position = cli.range.unwrap().start;
+
+        let (client_stream, server_stream) = duplex(8 * 1024);
+        let (client_reader, client_writer) = split(client_stream);
+        let (server_reader, _server_writer) = split(server_stream);
+        let workspace_uri = Url::from_directory_path(&workspace).unwrap();
+        let (rpc_client, _status_receiver, connection_task, capabilities) = spawn_json_rpc(
+            BufReader::new(client_reader),
+            client_writer,
+            workspace_uri,
+            workspace
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let lsp = HierarchyClient {
+            client: rpc_client.clone(),
+            workspace_root: workspace.clone(),
+            symbol_names: SymbolNameAdapter::RustAnalyzer,
+            document_symbols: Default::default(),
+            capabilities,
+        };
+        let hybrid = FetchHierarchyClient::with_fallback(lsp, tree_sitter.hierarchy_client());
+
+        let response = hybrid
+            .query(HierarchyQuery {
+                symbol: SymbolIdentity {
+                    symbol: "Cli".to_owned(),
+                    kind: HierarchyKind::Type,
+                    location: Some(SourceLocation {
+                        uri: cli.uri.to_string(),
+                        line: Some(position.line),
+                        character: Some(position.character),
+                    }),
+                },
+                direction: HierarchyDirection::Incoming,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.source, FetchSource::TreeSitter);
+        assert_eq!(
+            response
+                .children
+                .iter()
+                .map(|child| child.symbol.as_str())
+                .collect::<Vec<_>>(),
+            ["Command"]
+        );
+        let mut server_reader = BufReader::new(server_reader);
+        assert!(
+            timeout(Duration::from_millis(20), read_message(&mut server_reader))
+                .await
+                .is_err(),
+            "unsupported type hierarchy must not reach the LSP server"
+        );
+
+        drop(rpc_client);
+        connection_task.abort();
+        let _ = connection_task.await;
+        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
@@ -1983,7 +2267,7 @@ mod tests {
         let (client_reader, client_writer) = split(client_stream);
         let (server_reader, mut server_writer) = split(server_stream);
         let workspace_uri = Url::parse("file:///workspace").unwrap();
-        let (client, _status_receiver, connection_task) = spawn_json_rpc(
+        let (client, _status_receiver, connection_task, _capabilities) = spawn_json_rpc(
             BufReader::new(client_reader),
             client_writer,
             workspace_uri,
@@ -2077,7 +2361,7 @@ mod tests {
         let (client_reader, client_writer) = split(client_stream);
         let (server_reader, _server_writer) = split(server_stream);
         let workspace_uri = Url::parse("file:///workspace").unwrap();
-        let (client, _status_receiver, connection_task) = spawn_json_rpc(
+        let (client, _status_receiver, connection_task, _capabilities) = spawn_json_rpc(
             BufReader::new(client_reader),
             client_writer,
             workspace_uri,

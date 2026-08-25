@@ -153,8 +153,10 @@ pub struct App {
     pub save: Option<SaveState>,
     pub help: Option<HelpState>,
     pub analysis_status: AnalysisStatus,
+    pub message_history: Vec<String>,
     pub viewport: Viewport,
     pub canvas_notice: Option<String>,
+    canvas_notice_is_error: bool,
     symbol_filter: SymbolFilter,
     analysis_error: Option<String>,
     next_search_request_id: u64,
@@ -187,8 +189,10 @@ impl App {
             save: None,
             help: None,
             analysis_status: AnalysisStatus::inactive("No analysis backend"),
+            message_history: Vec::new(),
             viewport: Viewport::default(),
             canvas_notice: None,
+            canvas_notice_is_error: false,
             symbol_filter: SymbolFilter::default(),
             analysis_error: None,
             next_search_request_id: 1,
@@ -201,11 +205,57 @@ impl App {
     }
 
     pub fn set_analysis_error(&mut self, error: impl Into<String>) {
-        self.analysis_error = Some(error.into());
+        let error = error.into();
+        self.analysis_error = Some(error.clone());
+        self.set_canvas_error(error);
     }
 
     pub fn set_analysis_status(&mut self, status: AnalysisStatus) {
+        if matches!(
+            status.phase,
+            AnalysisPhase::Warning | AnalysisPhase::Error | AnalysisPhase::Disconnected
+        ) && let Some(message) = status.message.as_ref()
+            && !message.is_empty()
+        {
+            if matches!(
+                status.phase,
+                AnalysisPhase::Error | AnalysisPhase::Disconnected
+            ) {
+                self.set_canvas_error(message.clone());
+            } else {
+                self.set_canvas_notice(message.clone());
+            }
+        }
         self.analysis_status = status;
+    }
+
+    pub fn set_canvas_notice(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.record_message(message.clone());
+        self.canvas_notice = Some(message);
+        self.canvas_notice_is_error = false;
+    }
+
+    pub fn set_canvas_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.record_message(message.clone());
+        self.canvas_notice = Some(message);
+        self.canvas_notice_is_error = true;
+    }
+
+    pub fn clear_canvas_notice(&mut self) {
+        self.canvas_notice = None;
+        self.canvas_notice_is_error = false;
+    }
+
+    pub fn canvas_notice_is_error(&self) -> bool {
+        self.canvas_notice_is_error
+    }
+
+    fn record_message(&mut self, message: String) {
+        if self.message_history.last() != Some(&message) {
+            self.message_history.push(message);
+        }
     }
 
     pub fn pan_viewport(&mut self, delta_x: i32, delta_y: i32) {
@@ -221,11 +271,12 @@ impl App {
         let status = if provider_available {
             SearchStatus::Debouncing
         } else {
-            SearchStatus::Error(
-                self.analysis_error
-                    .clone()
-                    .unwrap_or_else(|| "No workspace-symbol provider is available".to_owned()),
-            )
+            let error = self
+                .analysis_error
+                .clone()
+                .unwrap_or_else(|| "No workspace-symbol provider is available".to_owned());
+            self.set_canvas_error(format!("Workspace symbol search unavailable: {error}"));
+            SearchStatus::Error(error)
         };
         self.pending_key = None;
         self.search = Some(SearchState {
@@ -261,18 +312,26 @@ impl App {
     }
 
     pub fn finish_search(&mut self, request_id: u64, result: Result<Vec<SearchItem>, String>) {
-        let symbol_filter = &self.symbol_filter;
-        let Some(search) = self.search.as_mut() else {
+        let Some(current_request_id) = self.search.as_ref().map(|search| search.request_id) else {
             return;
         };
         // A result may arrive after the modal was closed and reopened. Request
         // ids are global to App so an old session cannot replace a new one.
-        if search.request_id != request_id {
+        if current_request_id != request_id {
             return;
         }
 
+        if let Err(error) = &result {
+            self.set_canvas_error(format!("Workspace symbol query failed: {error}"));
+        }
+
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+
         match result {
             Ok(candidates) => {
+                let symbol_filter = &self.symbol_filter;
                 search.candidates = candidates
                     .into_iter()
                     .filter(|candidate| !symbol_filter.is_ignored(&candidate.name))
@@ -379,7 +438,7 @@ impl App {
         };
         self.selected = Some(node_id);
         self.viewport = Viewport::default();
-        self.canvas_notice = None;
+        self.clear_canvas_notice();
         Ok(node_id)
     }
 
@@ -388,10 +447,10 @@ impl App {
             return false;
         };
         if !self.graph.unpin(selected) {
-            self.canvas_notice = Some("Selected node is not an anchor".to_owned());
+            self.set_canvas_notice("Selected node is not an anchor");
             return false;
         }
-        self.canvas_notice = None;
+        self.clear_canvas_notice();
         self.selected = self.graph.anchors().last().copied();
         true
     }
@@ -402,7 +461,7 @@ impl App {
         };
         let cleared = self.graph.clear_branch(selected, direction);
         if cleared {
-            self.canvas_notice = None;
+            self.clear_canvas_notice();
         }
         cleared
     }
@@ -448,10 +507,15 @@ impl App {
             return None;
         }
         if !hierarchy_available {
+            let message = format!(
+                "Hierarchy query unavailable for {}: no analysis provider",
+                identity.symbol
+            );
             branch.load_state = crate::state::LoadState::Failed;
             branch.expanded = false;
             branch.failure = Some("Hierarchy requires an available LSP server".to_owned());
             branch.active_request_id = None;
+            self.set_canvas_error(message);
             return None;
         }
 
@@ -470,11 +534,11 @@ impl App {
         };
         self.selected = Some(selected);
         if !hierarchy_available {
-            self.canvas_notice = Some("Refresh requires an available LSP server".to_owned());
+            self.set_canvas_notice("Refresh requires an available LSP server");
             return Vec::new();
         }
 
-        self.canvas_notice = None;
+        self.clear_canvas_notice();
         let identity = self
             .graph
             .node(selected)
@@ -552,13 +616,21 @@ impl App {
                     branch.expanded = false;
                 }
                 if source == FetchSource::TreeSitter {
-                    self.canvas_notice = Some(
+                    self.set_canvas_notice(
                         "Tree-sitter: syntactic relations only; dynamic dispatch may be omitted"
                             .to_owned(),
                     );
                 }
             }
             Err(error) => {
+                let direction = match request.query.direction {
+                    HierarchyDirection::Incoming => "incoming/parent",
+                    HierarchyDirection::Outgoing => "outgoing/child",
+                };
+                self.set_canvas_error(format!(
+                    "Hierarchy query failed for {} ({direction}): {error}",
+                    request.query.symbol.symbol
+                ));
                 let branch = self
                     .graph
                     .node_mut(node_id)
@@ -1058,6 +1130,10 @@ mod tests {
         assert_eq!(
             app.graph.node(root).unwrap().incoming.failure(),
             Some("not supported")
+        );
+        assert_eq!(
+            app.message_history.last().map(String::as_str),
+            Some("Hierarchy query failed for Root (incoming/parent): not supported")
         );
 
         let retry = app

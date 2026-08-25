@@ -17,7 +17,7 @@ pub struct SaveState {
 impl App {
     pub fn open_save(&mut self) {
         self.pending_key = None;
-        self.canvas_notice = None;
+        self.clear_canvas_notice();
         self.save = Some(SaveState {
             input: String::new(),
             status: SaveStatus::Editing,
@@ -45,14 +45,16 @@ impl App {
     }
 
     pub fn fail_save(&mut self, error: impl Into<String>) {
+        let error = error.into();
         if let Some(save) = self.save.as_mut() {
-            save.status = SaveStatus::Error(error.into());
+            save.status = SaveStatus::Error(error.clone());
         }
+        self.set_canvas_error(format!("Save failed: {error}"));
     }
 
     pub fn complete_save(&mut self, path: &Path) {
         self.save = None;
-        self.canvas_notice = Some(format!("Saved graph to {}", path.display()));
+        self.set_canvas_notice(format!("Saved graph to {}", path.display()));
     }
 }
 

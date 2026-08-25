@@ -31,7 +31,7 @@ reader 使用 `BufReader::take(MAX_FRAME_BYTES + 1)` 在反序列化前执行 1 
 
 `IpcServer` actor 同时接受连接、接收 TUI 事件和处理断开通知。每个客户端有独立的容量 16 channel 和 writer task；一次事件只序列化一次，再以 `Arc<[u8]>` 发给全部客户端。队列已满或 sender 已关闭时，该客户端从广播集合移除，因此慢客户端不会阻塞 Crossterm 同步事件循环，也不会拖住其他编辑器。
 
-TUI sender 在入队前读取原子连接计数。无客户端、位置不完整或 server actor 已结束都会返回可诊断错误，TUI 只更新 footer notice；连接数是提示性快照，真正断开仍由各 writer 独立处理。
+TUI sender 在入队前读取原子连接计数。无客户端、位置不完整或 server actor 已结束都会返回可诊断错误，TUI 更新倒数第二行摘要并写入统一消息历史；连接数是提示性快照，真正断开仍由各 writer 独立处理。
 
 ## 入站请求与响应
 

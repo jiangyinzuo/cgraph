@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
     let tree_sitter = if lsp.is_none() {
         start_tree_sitter_fallback(&workspace, &mut app)
     } else {
-        None
+        start_tree_sitter_hierarchy_fallback(&workspace)
     };
     let symbol_client = lsp
         .as_ref()
@@ -74,16 +74,15 @@ async fn main() -> Result<()> {
                 .map(TreeSitterProvider::workspace_symbol_client)
                 .map(WorkspaceSymbolClient::from)
         });
-    let hierarchy_client = lsp
-        .as_ref()
-        .map(LspProvider::hierarchy_client)
-        .map(HierarchyClient::from)
-        .or_else(|| {
-            tree_sitter
-                .as_ref()
-                .map(TreeSitterProvider::hierarchy_client)
-                .map(HierarchyClient::from)
-        });
+    let hierarchy_client = match (lsp.as_ref(), tree_sitter.as_ref()) {
+        (Some(lsp), Some(tree_sitter)) => Some(HierarchyClient::with_fallback(
+            lsp.hierarchy_client(),
+            tree_sitter.hierarchy_client(),
+        )),
+        (Some(lsp), None) => Some(HierarchyClient::from(lsp.hierarchy_client())),
+        (None, Some(tree_sitter)) => Some(HierarchyClient::from(tree_sitter.hierarchy_client())),
+        (None, None) => None,
+    };
     let lsp_status_receiver = lsp.as_mut().and_then(LspProvider::take_status_receiver);
     let ipc_event_sender = ipc_server.as_ref().map(IpcServer::event_sender);
     let ipc_command_receiver = ipc_server
@@ -141,6 +140,11 @@ fn start_tree_sitter_fallback(workspace: &Path, app: &mut App) -> Option<TreeSit
             None
         }
     }
+}
+
+fn start_tree_sitter_hierarchy_fallback(workspace: &Path) -> Option<TreeSitterProvider> {
+    let language = TreeSitterLanguage::detect(workspace)?;
+    TreeSitterProvider::start(workspace, language).ok()
 }
 
 fn lsp_config(cli: &Cli) -> Option<LspConfig> {

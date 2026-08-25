@@ -17,6 +17,10 @@ cgraph process
 
 同一次 cgraph 会话中，反复打开和关闭 `ac` / `at` 会复用相同的 rust-analyzer 及其内存索引。退出 cgraph 后，rust-analyzer 的内存分析数据库随进程销毁；下一次启动会重新创建。
 
+rust-analyzer 当前不实现 LSP 3.17 的标准 type hierarchy 请求，也不会动态注册 `textDocument/prepareTypeHierarchy`。直接发送该方法会收到 JSON-RPC `-32601 unknown request`；这不是索引尚未完成，也不能通过等待或重启解决。cgraph 现在追踪 server hierarchy capability，Rust 的 workspace symbol 与 call hierarchy 继续使用 rust-analyzer，type hierarchy 则按单次查询回退到进程内的 Tree-sitter Rust 索引。该索引只在第一次需要回退时惰性扫描项目，不会启动第二个 rust-analyzer，也不会影响 rust-analyzer 的索引生命周期。
+
+Tree-sitter 能确定 Rust `impl Trait for Type` 的 trait → type 关系，但不是 rust-analyzer 语义数据库的替代品；宏展开、复杂类型别名和其他非直接语法关系可能省略。回退结果带有独立来源，TUI 会显示 `syntactic relations only`，避免把成功空结果描述成完整语义结论。若未来 rust-analyzer 正式注册标准 type hierarchy，混合 client 会自动优先使用它，无需按版本号维护硬编码名单。
+
 选择这个模型是因为它具备清晰的所有权和故障边界：
 
 - 一个 cgraph 对应一个 LSP 会话，不需要协调多个客户端的配置和文档状态。
@@ -36,7 +40,7 @@ parse CLI
   -> select LSP configuration
   -> spawn rust-analyzer
   -> initialize / initialized
-  -> create WorkspaceSymbolClient
+  -> create WorkspaceSymbolClient / hybrid HierarchyClient
   -> initialize TUI
   -> run event loop
   -> restore terminal

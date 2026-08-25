@@ -6,7 +6,7 @@ cgraph 以 LSP 客户端身份启动一个通过 stdin/stdout 通信的语言服
 
 TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左侧同时保留快捷键提示。它与 `ac` / `at` 搜索弹窗中的单次查询状态分开维护。
 
-如果没有检测到 LSP、显式使用 `--no-lsp`，或 LSP 启动失败，cgraph 会尝试根据工作区浅层标志初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar 和 tags query。成功时底栏显示 `Tree-sitter: <language> · Ready`；初始化失败显示 Error。第一次 workspace symbol 搜索或 hierarchy 展开会在 blocking task 中惰性建立项目静态索引，后续查询复用该索引。
+如果没有检测到 LSP、显式使用 `--no-lsp`，或 LSP 启动失败，cgraph 会尝试根据工作区浅层标志初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar 和 tags query。成功时底栏显示 `Tree-sitter: <language> · Ready`；初始化失败显示 Error。LSP 正常运行时也会初始化同语言的轻量 hierarchy 后备，但不会替代底栏中的 LSP 主状态，也不会提前扫描项目。第一次实际使用 Tree-sitter 搜索或 hierarchy 回退时才在 blocking task 中惰性建立项目静态索引，后续查询复用该索引。
 
 ## 自动检测
 
@@ -37,7 +37,7 @@ cgraph 会发送：
 - 当前进程 id；
 - canonicalized workspace URI；
 - workspace folder；
-- workspace symbol、call hierarchy、type hierarchy、workspace folders 和 configuration 客户端能力；
+- workspace symbol、call hierarchy、type hierarchy、workspace folders 和 configuration 客户端能力；call/type hierarchy 允许 server 动态注册；
 - 仅支持 UTF-16 的 position encoding 能力；server 未声明时按 LSP 默认 UTF-16 解释，显式选择其他编码则拒绝会话；
 - 标准 `window.workDoneProgress` 客户端能力；
 - rust-analyzer 使用的实验性 server status notification 能力；
@@ -78,7 +78,9 @@ Pyrefly 自身只在 query 至少有 3 个字符时执行 workspace-symbol 搜�
 
 每个节点的左右分支独立保存 `NotLoaded`、`Loading`、`Loaded` 或 `Failed`。成功结果（包括成功的空结果）会缓存；失败不会伪装成空结果，按相同方向键或点击 `[!]` 可以重试。语言服务器未实现某个标准方法时也会进入明确错误状态。
 
-Tree-sitter 使用同一个方向模型：caller/parent 指向 callee/child。Rust 和 Python 使用 grammar tags 中的直接调用捕获，C/C++ 使用 `call_expression`；Rust trait impl、C++ base class 和 Python superclass 形成类型边，C 没有语言级继承边。只有名称能在项目定义中唯一绑定时才建立关系，方法优先在当前类/impl 内绑定。动态分派、宏展开后的调用、复杂 import/namespace 解析和歧义目标可能省略，因此每次成功结果都会在 footer 显示 `syntactic relations only`，不能将它等同于 LSP 完整语义。
+Tree-sitter 使用同一个方向模型：caller/parent 指向 callee/child。Rust 和 Python 使用 grammar tags 中的直接调用捕获，C/C++ 使用 `call_expression`；Rust trait impl、C++ base class 和 Python superclass 形成类型边，C 没有语言级继承边。只有名称能在项目定义中唯一绑定时才建立关系，方法优先在当前类/impl 内绑定。动态分派、宏展开后的调用、复杂 import/namespace 解析和歧义目标可能省略，因此每次成功结果都会在倒数第二行显示 `syntactic relations only` 并进入消息历史，不能将它等同于 LSP 完整语义。
+
+LSP hierarchy 不采用“先发送再看是否返回 Method not found”的能力探测。call hierarchy 读取 initialize 的静态声明并接受后续动态注册；LSP 3.17 type hierarchy 依赖 `client/registerCapability`，cgraph 会追踪注册与注销。若当前 server 没有声明所需 kind，而工作区语言受 Tree-sitter 支持，该次 hierarchy 查询自动使用静态后备；其他已声明能力仍留在同一个 LSP 会话中。当前 rust-analyzer 不实现标准 type hierarchy，因此 Rust 的 `at` 节点左右展开会走 Tree-sitter，`ac` 搜索和 call 展开仍走 rust-analyzer。
 
 ## 独立诊断示例
 

@@ -73,7 +73,7 @@ cgraph --workspace .
 
 底部状态摘要描述整个分析后端，搜索弹窗中的 `Waiting for typing pause…` / `Searching workspace symbols…` 只描述当前搜索。即使 LSP 后端显示 `Working`，也可以尝试搜索；结果是否完整取决于语言服务器当时已经建立的索引。
 
-如果 LSP 没有启动，cgraph 会尝试初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar/query，并在底部状态栏显示结果。第一次 `ac` / `at` 搜索或 `tl` / `tr` 展开会惰性扫描项目源文件，之后复用同一静态索引。Tree-sitter 只返回能按名称唯一绑定的项目内语法关系；动态分派、同名歧义和项目外目标可能省略，展开完成后底栏会显示 `syntactic relations only` 提醒。
+如果 LSP 没有启动，cgraph 会尝试初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar/query，并在底部状态栏显示结果。LSP 已连接但没有声明当前 hierarchy kind 时，也会透明使用同语言 Tree-sitter 后备；例如 rust-analyzer 当前没有标准 type hierarchy，所以 Rust 类型展开走静态索引，而搜索和调用展开仍走 rust-analyzer。第一次 `ac` / `at` 搜索、纯静态展开或能力回退会惰性扫描项目源文件，之后复用同一索引。Tree-sitter 只返回能按名称唯一绑定的项目内语法关系；动态分派、同名歧义和项目外目标可能省略，展开完成后底栏会显示 `syntactic relations only` 提醒。
 
 ## 创建初始图入口
 

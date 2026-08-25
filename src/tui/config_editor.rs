@@ -35,12 +35,12 @@ pub(super) fn edit_project_config(
     let outcome = match edit_result {
         Ok(outcome) => outcome,
         Err(error) => {
-            app.canvas_notice = Some(format!("Project config editor failed: {error:#}"));
+            app.set_canvas_error(format!("Project config editor failed: {error:#}"));
             return Ok(Vec::new());
         }
     };
     if !outcome.status.success() {
-        app.canvas_notice = Some(format!(
+        app.set_canvas_error(format!(
             "Project config editor exited with {}",
             outcome.status
         ));
@@ -49,7 +49,7 @@ pub(super) fn edit_project_config(
     let config = match ProjectConfig::load(&app.workspace) {
         Ok(config) => config,
         Err(error) => {
-            app.canvas_notice = Some(format!(
+            app.set_canvas_error(format!(
                 "Project config reload failed for {}: {error:#}",
                 outcome.path.display()
             ));

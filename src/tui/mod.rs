@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Result;
 use crossterm::{
+    clipboard::CopyToClipboard,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -45,6 +46,7 @@ use crate::{
 mod canvas;
 mod config_editor;
 mod help;
+mod messages;
 mod save;
 mod search;
 
@@ -61,6 +63,8 @@ enum InteractionRequest {
     Hierarchy(Vec<HierarchyLoadRequest>),
     OpenLocation(SourceLocation),
     EditConfig,
+    OpenMessages,
+    CopyMessages(String),
 }
 
 struct HierarchyQueryEvent {
@@ -121,6 +125,15 @@ fn resume(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
+fn set_mouse_capture(terminal: &mut Tui, enabled: bool) -> Result<()> {
+    if enabled {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    } else {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
+    Ok(())
+}
+
 pub fn run(
     terminal: &mut Tui,
     app: &mut App,
@@ -138,6 +151,7 @@ pub fn run(
     let mut search_task: Option<JoinHandle<()>> = None;
     let mut hierarchy_tasks = Vec::<JoinHandle<()>>::new();
     let mut canvas_drag = CanvasDragState::default();
+    let mut message_view: Option<messages::MessageViewState> = None;
 
     while !app.should_quit {
         if let Some(receiver) = ipc_command_receiver.as_mut() {
@@ -164,17 +178,22 @@ pub fn run(
             });
         }
         hierarchy_tasks.retain(|task| !task.is_finished());
-        terminal.draw(|frame| render(frame, app))?;
+        if let Some(view) = message_view.as_mut() {
+            view.sync(&app.message_history);
+        }
+        terminal.draw(|frame| render_with_messages(frame, app, message_view.as_mut()))?;
 
         if event::poll(Duration::from_millis(50))? {
             let (width, height) = terminal_size()?;
             let screen = Rect::new(0, 0, width, height);
-            let request = handle_event(
+            let message_was_open = message_view.is_some();
+            let request = handle_event_with_messages(
                 app,
                 event::read()?,
                 hierarchy_client.is_some(),
                 screen,
                 &mut canvas_drag,
+                &mut message_view,
             );
             if app.search.is_none()
                 && let Some(task) = search_task.take()
@@ -220,7 +239,25 @@ pub fn run(
                         }
                     }
                 }
+                Some(InteractionRequest::OpenMessages) => {
+                    message_view = Some(messages::MessageViewState::from_messages(
+                        &app.message_history,
+                    ));
+                }
+                Some(InteractionRequest::CopyMessages(text)) => {
+                    let character_count = text.chars().count();
+                    let notice = match copy_message_to_clipboard(terminal, &text) {
+                        Ok(()) => format!("yanked {character_count} chars via OSC 52"),
+                        Err(error) => format!("copy failed: {error:#}"),
+                    };
+                    if let Some(view) = message_view.as_mut() {
+                        view.set_copy_notice(notice);
+                    }
+                }
                 None => {}
+            }
+            if message_was_open != message_view.is_some() {
+                set_mouse_capture(terminal, message_view.is_none())?;
             }
         }
     }
@@ -232,6 +269,14 @@ pub fn run(
         task.abort();
     }
 
+    Ok(())
+}
+
+fn copy_message_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
+    execute!(
+        terminal.backend_mut(),
+        CopyToClipboard::to_clipboard_from(text)
+    )?;
     Ok(())
 }
 
@@ -249,7 +294,7 @@ fn apply_ipc_command(app: &mut App, command: IpcCommand) {
             location,
         }) {
             Ok(_) => {
-                app.canvas_notice = Some(format!(
+                app.set_canvas_notice(format!(
                     "IPC request {request_id} focused {} symbol {symbol:?}",
                     match hierarchy {
                         crate::state::HierarchyKind::Call => "call",
@@ -258,11 +303,14 @@ fn apply_ipc_command(app: &mut App, command: IpcCommand) {
                 ));
                 IpcResponse::Accepted
             }
-            Err(message) => IpcResponse::Error { message },
+            Err(message) => {
+                app.set_canvas_error(format!("IPC request {request_id} rejected: {message}"));
+                IpcResponse::Error { message }
+            }
         },
     };
     if let Err(error) = responder.respond(response) {
-        app.canvas_notice = Some(format!("IPC response {request_id} failed: {error:#}"));
+        app.set_canvas_error(format!("IPC response {request_id} failed: {error:#}"));
     }
 }
 
@@ -272,15 +320,18 @@ fn send_open_location(
     location: &SourceLocation,
 ) {
     let Some(event_sender) = event_sender else {
-        app.canvas_notice =
-            Some("IPC is not enabled; start cgraph with --ipc-socket <PATH>".to_owned());
+        app.set_canvas_notice("IPC is not enabled; start cgraph with --ipc-socket <PATH>");
         return;
     };
-    app.canvas_notice = Some(match event_sender.send_open_location(location) {
-        Ok(1) => "Sent source location to 1 IPC client".to_owned(),
-        Ok(client_count) => format!("Sent source location to {client_count} IPC clients"),
-        Err(error) => format!("IPC open-location failed: {error:#}"),
-    });
+    match event_sender.send_open_location(location) {
+        Ok(1) => app.set_canvas_notice("Sent source location to 1 IPC client"),
+        Ok(client_count) => {
+            app.set_canvas_notice(format!(
+                "Sent source location to {client_count} IPC clients"
+            ));
+        }
+        Err(error) => app.set_canvas_error(format!("IPC open-location failed: {error:#}")),
+    }
 }
 
 fn schedule_hierarchy(
@@ -344,6 +395,7 @@ fn apply_lsp_status(app: &mut App, update: LspStatusUpdate) {
     app.set_analysis_status(status);
 }
 
+#[cfg(test)]
 fn handle_event(
     app: &mut App,
     event: Event,
@@ -351,9 +403,39 @@ fn handle_event(
     screen: Rect,
     canvas_drag: &mut CanvasDragState,
 ) -> Option<InteractionRequest> {
+    let mut message_view = None;
+    handle_event_with_messages(
+        app,
+        event,
+        analysis_available,
+        screen,
+        canvas_drag,
+        &mut message_view,
+    )
+}
+
+fn handle_event_with_messages(
+    app: &mut App,
+    event: Event,
+    analysis_available: bool,
+    screen: Rect,
+    canvas_drag: &mut CanvasDragState,
+    message_view: &mut Option<messages::MessageViewState>,
+) -> Option<InteractionRequest> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            let request = if app.help.is_some() {
+            let request = if let Some(view) = message_view.as_mut() {
+                match messages::handle_key(view, key) {
+                    messages::MessageAction::Close => {
+                        *message_view = None;
+                        None
+                    }
+                    messages::MessageAction::Copy(text) => {
+                        Some(InteractionRequest::CopyMessages(text))
+                    }
+                    messages::MessageAction::Handled => None,
+                }
+            } else if app.help.is_some() {
                 help::handle_key(app, key);
                 None
             } else if app.search.is_some() {
@@ -370,7 +452,10 @@ fn handle_event(
             request
         }
         Event::Mouse(mouse) => {
-            if app.help.is_some() {
+            if message_view.is_some() {
+                *canvas_drag = CanvasDragState::default();
+                None
+            } else if app.help.is_some() {
                 *canvas_drag = CanvasDragState::default();
                 help::handle_mouse(app, mouse);
                 None
@@ -449,6 +534,12 @@ fn handle_canvas_key(
                 }
                 None
             }
+            'g' => {
+                if key.code == KeyCode::Char('<') && key.modifiers == KeyModifiers::NONE {
+                    return Some(InteractionRequest::OpenMessages);
+                }
+                None
+            }
             _ => None,
         };
     }
@@ -465,6 +556,9 @@ fn handle_canvas_key(
         }
         KeyCode::Char('t') if key.modifiers == KeyModifiers::NONE => {
             app.pending_key = Some('t');
+        }
+        KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => {
+            app.pending_key = Some('g');
         }
         KeyCode::Left | KeyCode::Char('h') if key.modifiers == KeyModifiers::NONE => {
             move_canvas_selection(app, NavigationDirection::Left, screen);
@@ -616,7 +710,7 @@ fn finish_canvas_click(
             !location.uri.is_empty() && location.line.is_some() && location.character.is_some()
         })
     else {
-        app.canvas_notice = Some("Selected node has no exact source location".to_owned());
+        app.set_canvas_notice("Selected node has no exact source location");
         return None;
     };
     Some(InteractionRequest::OpenLocation(location))
@@ -735,8 +829,17 @@ fn rect_center(area: Rect) -> (i32, i32) {
     )
 }
 
+#[cfg(test)]
 fn render(frame: &mut Frame, app: &App) {
-    let [canvas, footer] = canvas_and_footer(frame.area());
+    render_with_messages(frame, app, None);
+}
+
+fn render_with_messages(
+    frame: &mut Frame,
+    app: &App,
+    mut message_view: Option<&mut messages::MessageViewState>,
+) {
+    let [canvas, message_area, footer] = canvas_message_and_footer(frame.area());
 
     let canvas_inner = canvas;
 
@@ -794,12 +897,17 @@ fn render(frame: &mut Frame, app: &App) {
         Some('d') => "d_: d unpin anchor / p clear left / n clear right".to_owned(),
         Some('e') => "e_: c edit project config".to_owned(),
         Some('t') => "t_: l toggle left / r toggle right".to_owned(),
-        _ => hierarchy_failure
-            .or_else(|| app.canvas_notice.clone())
-            .unwrap_or_else(|| {
-                "?: help  ac/at: add  tl/tr: expand  hjkl: move  q: quit".to_owned()
-            }),
+        Some('g') => "g_: <: show messages".to_owned(),
+        _ => "?: help  ac/at: add  tl/tr: expand  hjkl: move  q: quit".to_owned(),
     };
+    render_message_summary(
+        frame,
+        message_area,
+        app.canvas_notice
+            .as_deref()
+            .map(|message| (message, app.canvas_notice_is_error()))
+            .or_else(|| hierarchy_failure.as_deref().map(|message| (message, true))),
+    );
     render_footer(frame, footer, footer_text, &app.analysis_status);
 
     if let Some(help_state) = &app.help {
@@ -809,15 +917,41 @@ fn render(frame: &mut Frame, app: &App) {
     } else if let Some(save_state) = &app.save {
         save::render(frame, save_state);
     }
+    if let Some(view) = message_view.as_mut() {
+        messages::render(frame, view, frame.area());
+    }
 }
 
-fn canvas_and_footer(screen: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(screen)
+fn canvas_message_and_footer(screen: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(screen)
 }
 
 fn canvas_inner_area(screen: Rect) -> Rect {
-    let [canvas, _] = canvas_and_footer(screen);
+    let [canvas, _, _] = canvas_message_and_footer(screen);
     canvas
+}
+
+fn render_message_summary(frame: &mut Frame, area: Rect, message: Option<(&str, bool)>) {
+    let Some((message, is_error)) = message else {
+        return;
+    };
+    let (prefix, color) = if is_error {
+        ("ERROR: ", Color::Red)
+    } else {
+        ("", Color::Yellow)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(color)),
+            Span::styled(message, Style::default().fg(color)),
+        ])),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, shortcuts: String, status: &AnalysisStatus) {
@@ -895,11 +1029,12 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     use tower_lsp::lsp_types::{SymbolKind, Url};
 
+    use super::messages;
     use super::{
         CanvasDragState, EdgeVisualKind, InteractionRequest, NavigationDirection,
         apply_ipc_command, apply_lsp_status, canvas_heading, canvas_inner_area, canvas_layout,
         handle_canvas_key, handle_canvas_mouse, move_canvas_selection, placement_bounds,
-        rect_center, render,
+        rect_center, render, render_with_messages,
         search::{search_item, symbol_matches_search},
         send_open_location, with_stable_node_position, world_canvas_layout, world_rects_overlap,
     };
@@ -1059,6 +1194,53 @@ mod tests {
     }
 
     #[test]
+    fn messages_use_the_penultimate_row_without_replacing_footer_shortcuts() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        app.set_analysis_status(crate::app::AnalysisStatus {
+            backend: AnalysisBackend::Lsp("rust-analyzer".to_owned()),
+            phase: AnalysisPhase::Error,
+            message: Some("server crashed".to_owned()),
+            percentage: None,
+        });
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let message_row = (0..100).fold(String::new(), |mut row, x| {
+            row.push_str(terminal.backend().buffer().cell((x, 10)).unwrap().symbol());
+            row
+        });
+        let bottom_row = (0..100).fold(String::new(), |mut row, x| {
+            row.push_str(terminal.backend().buffer().cell((x, 11)).unwrap().symbol());
+            row
+        });
+        assert!(message_row.contains("ERROR: server crashed"));
+        assert!(bottom_row.contains("hjkl: move"));
+        assert!(bottom_row.contains("LSP: rust-analyzer"));
+        assert!(!bottom_row.contains("server crashed"));
+
+        let mut hierarchy_app =
+            App::from_cli(Cli::try_parse_from(["cgraph", "call", "main"]).unwrap());
+        let request = hierarchy_app
+            .toggle_selected_branch(HierarchyDirection::Outgoing, true)
+            .unwrap();
+        assert!(hierarchy_app.finish_hierarchy(&request, Err("content modified".to_owned())));
+        terminal
+            .draw(|frame| render(frame, &hierarchy_app))
+            .unwrap();
+        let message_row = (0..100).fold(String::new(), |mut row, x| {
+            row.push_str(terminal.backend().buffer().cell((x, 10)).unwrap().symbol());
+            row
+        });
+        let bottom_row = (0..100).fold(String::new(), |mut row, x| {
+            row.push_str(terminal.backend().buffer().cell((x, 11)).unwrap().symbol());
+            row
+        });
+        assert!(message_row.contains("ERROR: Hierarchy query failed"));
+        assert!(message_row.contains("content modified"));
+        assert!(bottom_row.contains("hjkl: move"));
+    }
+
+    #[test]
     fn canvas_heading_uses_the_default_label_or_selected_node_uri() {
         let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         assert_eq!(canvas_heading(&app), "CALL GRAPH");
@@ -1151,6 +1333,67 @@ mod tests {
             Some(InteractionRequest::EditConfig)
         ));
         assert_eq!(app.pending_key, None);
+    }
+
+    #[test]
+    fn g_less_than_opens_the_message_view_command() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let screen = Rect::new(0, 0, 100, 24);
+
+        assert!(
+            handle_canvas_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                false,
+                screen,
+            )
+            .is_none()
+        );
+        assert_eq!(app.pending_key, Some('g'));
+        assert!(matches!(
+            handle_canvas_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE),
+                false,
+                screen,
+            ),
+            Some(InteractionRequest::OpenMessages)
+        ));
+        assert_eq!(app.pending_key, None);
+
+        app.set_canvas_notice("first message");
+        app.set_canvas_notice("second message");
+        let mut view = messages::MessageViewState::from_messages(&app.message_history);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render_with_messages(frame, &app, Some(&mut view)))
+            .unwrap();
+        let content =
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .fold(String::new(), |mut output, cell| {
+                    output.push_str(cell.symbol());
+                    output
+                });
+        let bottom_row = (0..100).fold(String::new(), |mut row, column| {
+            row.push_str(
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((column, 23))
+                    .unwrap()
+                    .symbol(),
+            );
+            row
+        });
+        assert!(content.contains("Messages"));
+        assert!(content.contains("first message"));
+        assert!(content.contains("second message"));
+        assert!(bottom_row.contains("?: help"));
+        assert!(bottom_row.contains("Backend: none"));
     }
 
     #[test]

@@ -10,7 +10,7 @@ rust-analyzer 的进程模型、冷索引原因与未来复用路线单独记录
 
 ## Provider 与 Client Handle
 
-`LspProvider` 拥有语言服务器子进程、连接任务和关闭流程，不能克隆。`LspConfig::for_server` 把已知可执行文件转换为实际 stdio 命令；大多数 server 不加参数，Pyrefly 自动增加 `lsp` 子命令，再追加用户参数。LSP 专用 client 只持有 JSON-RPC actor 的发送端和 canonical workspace root；`TreeSitterProvider` 拥有 grammar/query readiness 和共享的 single-flight 项目索引状态。Fetch 顶层的 `WorkspaceSymbolClient` / `HierarchyClient` 枚举把两种实现收敛为可克隆的窄接口，TUI 不判断 provider 类型。
+`LspProvider` 拥有语言服务器子进程、连接任务和关闭流程，不能克隆。`LspConfig::for_server` 把已知可执行文件转换为实际 stdio 命令；大多数 server 不加参数，Pyrefly 自动增加 `lsp` 子命令，再追加用户参数。LSP 专用 client 只持有 JSON-RPC actor 的发送端、canonical workspace root 和服务端 hierarchy 能力状态；`TreeSitterProvider` 拥有 grammar/query readiness 和共享的 single-flight 项目索引状态。Fetch 顶层的 `WorkspaceSymbolClient` / `HierarchyClient` 把实现收敛为可克隆的窄接口，TUI 不判断 provider 类型。`HierarchyClient::Hybrid` 可以在同一会话中保留 LSP 主后端与 Tree-sitter 后备，并按单次查询能力选择，而不是把整个会话强制绑定到较弱后端。
 
 这样设计有两个原因：
 
@@ -71,7 +71,11 @@ rust-analyzer `experimental/serverStatus` 的 `health=warning/error` 映射为�
 
 `HierarchyQuery` 描述语义符号、call/type 模式和 incoming/outgoing 方向；`HierarchyResponse` 记录归一化孩子和数据来源。`HierarchyClient` 对精确位置执行标准两阶段请求；CLI 根没有位置时，先执行 workspace symbol 精确解析，同名候选不唯一则返回错误而不是任选一个重载。
 
-call hierarchy 使用 prepare 后的 `CallHierarchyItem` 请求 incoming/outgoing calls；type hierarchy使用 `TypeHierarchyItem` 请求 supertypes/subtypes。协议 item 的 `data` 在第二阶段请求中保留。`detail` 不是结构化容器字段，只能由对应 LSP adapter 解释；当前 rust-analyzer 会把方法标成 `Function` 并把签名放在 `detail`，所以 Rust adapter 额外按文件请求并缓存 document symbols，用标准 `containerName` 生成 `Type::name`，失败时保留原名。Fetch 会按 `SymbolIdentity` 去重 provider 响应，App 在写入 incoming/outgoing 缓存前应用项目过滤并做防御性分支内去重；State 按层次类型与源码位置全局复用同一 `NodeId`，同时保留不同方向观察到的边。
+call hierarchy 使用 prepare 后的 `CallHierarchyItem` 请求 incoming/outgoing calls；type hierarchy 使用 `TypeHierarchyItem` 请求 supertypes/subtypes。协议 item 的 `data` 在第二阶段请求中保留。`detail` 不是结构化容器字段，只能由对应 LSP adapter 解释；当前 rust-analyzer 会把方法标成 `Function` 并把签名放在 `detail`，所以 Rust adapter 额外按文件请求并缓存 document symbols，用标准 `containerName` 生成 `Type::name`，失败时保留原名。Fetch 会按 `SymbolIdentity` 去重 provider 响应，App 在写入 incoming/outgoing 缓存前应用项目过滤并做防御性分支内去重；State 按层次类型与源码位置全局复用同一 `NodeId`，同时保留不同方向观察到的边。
+
+call hierarchy 可以在 initialize result 中静态声明，也可以动态注册；type hierarchy 在 LSP 3.17 中只通过 `client/registerCapability` 注册。客户端将两项 `dynamicRegistration` 声明为 `true`，actor 按 registration id 追踪注册与注销。查询发出前必须检查当前能力，未声明的方法不能靠“试一次并接受 `-32601`”探测，因为这会把可预知的能力缺失污染为用户错误。
+
+主程序会为可识别的 Rust、C、C++、Python 工作区同时初始化一个轻量 Tree-sitter hierarchy 后备。grammar/query 初始化不扫描项目；只有 LSP 未声明当前 hierarchy kind 时，`Hybrid` 才把该次查询交给 Tree-sitter 并惰性建立共享索引。workspace symbol 始终优先 LSP，已声明的 hierarchy 也仍由 LSP 处理。Tree-sitter 响应保留 `FetchSource::TreeSitter`，因此 UI 会明确提示语法级置信度。若没有可用的 Tree-sitter 语言，LSP client 在发送任何请求前返回清晰的 capability 错误。
 
 Fetch 层不把方法不支持、连接错误或取消转换为空数组。成功空数组才表示该方向确实没有孩子。分支缓存和 request-id 竞争处理位于 App/State；后续显式刷新需要绕过缓存并保留仍存在孩子的实例状态。
 
@@ -85,4 +89,4 @@ definitions 来自各 grammar 自带 tags query。Rust/Python 的 `reference.cal
 
 Tree-sitter 的 `Point.column` 是 UTF-8 字节偏移；索引层根据捕获点所在行的 UTF-8 前缀计算 UTF-16 code-unit 数，再构造公共 `SourceLocation`。这与 LSP 的强制 UTF-16 协商保持一致，避免 IPC 或节点身份在非 ASCII 源码中混用两种列坐标。
 
-`FetchSource::TreeSitter` 是显式置信度边界。App 接收成功结果后在 footer notice 显示 `syntactic relations only; dynamic dispatch may be omitted`，因此成功空数组只表示索引中没有可唯一绑定的语法边，不被描述成完整语义证明。项目外调用、动态分派、宏展开、复杂 import/namespace 解析及歧义重载当前可能省略。
+`FetchSource::TreeSitter` 是显式置信度边界。App 接收成功结果后在倒数第二行显示 `syntactic relations only; dynamic dispatch may be omitted` 并写入消息历史，因此成功空数组只表示索引中没有可唯一绑定的语法边，不被描述成完整语义证明。项目外调用、动态分派、宏展开、复杂 import/namespace 解析及歧义重载当前可能省略。

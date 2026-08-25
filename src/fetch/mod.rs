@@ -91,13 +91,28 @@ impl From<TreeSitterWorkspaceSymbolClient> for WorkspaceSymbolClient {
 pub enum HierarchyClient {
     Lsp(LspHierarchyClient),
     TreeSitter(TreeSitterHierarchyClient),
+    Hybrid {
+        lsp: LspHierarchyClient,
+        tree_sitter: TreeSitterHierarchyClient,
+    },
 }
 
 impl HierarchyClient {
+    pub fn with_fallback(lsp: LspHierarchyClient, tree_sitter: TreeSitterHierarchyClient) -> Self {
+        Self::Hybrid { lsp, tree_sitter }
+    }
+
     pub async fn query(&self, query: HierarchyQuery) -> anyhow::Result<HierarchyResponse> {
         match self {
             Self::Lsp(client) => client.query(query).await,
             Self::TreeSitter(client) => client.query(query).await,
+            Self::Hybrid { lsp, tree_sitter } => {
+                if lsp.supports(query.symbol.kind) {
+                    lsp.query(query).await
+                } else {
+                    tree_sitter.query(query).await
+                }
+            }
         }
     }
 }

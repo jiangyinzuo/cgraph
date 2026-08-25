@@ -33,7 +33,7 @@ impl App {
         }
 
         if !hierarchy_available {
-            self.canvas_notice = Some(
+            self.set_canvas_notice(
                 "Project config reloaded; graph refresh requires an analysis provider".to_owned(),
             );
             return Vec::new();
@@ -45,7 +45,7 @@ impl App {
                 self.begin_hierarchy_load(node_id, identity, direction, CachePolicy::Refresh, false)
             })
             .collect::<Vec<_>>();
-        self.canvas_notice = Some(if requests.is_empty() {
+        self.set_canvas_notice(if requests.is_empty() {
             "Project config reloaded; no loaded graph branches to refresh".to_owned()
         } else {
             format!(

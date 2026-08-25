@@ -29,6 +29,6 @@
 
 ## 当前实现与差距
 
-LSP call/type prepare、双向单层请求、独立异步加载、分支缓存、失败重试、全局语义节点去重、循环安全可见图和显式双向单层刷新已经连接。没有 LSP 时，Rust、C、C++ 和 Python 共用一个惰性 Tree-sitter 项目索引，向同一 `HierarchyQuery` / `HierarchyResponse` 边界提供项目内静态调用和类型关系。
+LSP call/type prepare、双向单层请求、独立异步加载、分支缓存、失败重试、全局语义节点去重、循环安全可见图和显式双向单层刷新已经连接。Fetch 会检查 server 对当前 hierarchy kind 的静态声明或动态注册；未声明的方法不会发送。Rust、C、C++ 和 Python 可在 LSP 会话旁保留一个惰性 Tree-sitter hierarchy 后备，按单次查询能力提供项目内静态调用和类型关系。没有 LSP 时，同一 provider 还承担 workspace symbol 搜索。
 
-Tree-sitter 只能返回语法上可唯一绑定的关系：动态分派、同名歧义和项目外目标可能被省略。每次 Tree-sitter hierarchy 成功后，footer notice 会明确显示 `syntactic relations only`，不会把成功空结果宣称为完整语义结论。
+Tree-sitter 只能返回语法上可唯一绑定的关系：动态分派、同名歧义和项目外目标可能被省略。每次 Tree-sitter hierarchy 成功后，倒数第二行会明确显示 `syntactic relations only` 并写入消息历史，不会把成功空结果宣称为完整语义结论。
