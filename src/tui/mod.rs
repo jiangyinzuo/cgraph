@@ -22,9 +22,9 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Paragraph},
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
@@ -738,12 +738,7 @@ fn rect_center(area: Rect) -> (i32, i32) {
 fn render(frame: &mut Frame, app: &App) {
     let [canvas, footer] = canvas_and_footer(frame.area());
 
-    let canvas_block = Block::default()
-        .title(" cgraph ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let canvas_inner = canvas_block.inner(canvas);
-    frame.render_widget(canvas_block, canvas);
+    let canvas_inner = canvas;
 
     if app.graph.anchors().is_empty() {
         frame.render_widget(
@@ -777,6 +772,15 @@ fn render(frame: &mut Frame, app: &App) {
             );
         }
     }
+
+    frame.render_widget(
+        Block::default().title(canvas_heading(app)).title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        canvas,
+    );
 
     let hierarchy_failure = app.selected.and_then(|selected| {
         let node = app.graph.node(selected)?;
@@ -813,19 +817,27 @@ fn canvas_and_footer(screen: Rect) -> [Rect; 2] {
 
 fn canvas_inner_area(screen: Rect) -> Rect {
     let [canvas, _] = canvas_and_footer(screen);
-    Block::default().borders(Borders::ALL).inner(canvas)
+    canvas
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, shortcuts: String, status: &AnalysisStatus) {
-    let status_width = area.width.saturating_mul(2) / 5;
-    let shortcut_width = area.width.saturating_sub(status_width);
-    let shortcut_area = Rect::new(area.x, area.y, shortcut_width, area.height);
-    let status_area = Rect::new(shortcut_area.right(), area.y, status_width, area.height);
-    frame.render_widget(
-        Paragraph::new(shortcuts).style(Style::default().fg(Color::DarkGray)),
-        shortcut_area,
-    );
-    frame.render_widget(Paragraph::new(analysis_status_line(status)), status_area);
+    let mut content = vec![Span::styled(
+        shortcuts,
+        Style::default().fg(Color::DarkGray),
+    )];
+    content.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
+    content.extend(analysis_status_line(status).spans);
+    frame.render_widget(Paragraph::new(Line::from(content)), area);
+}
+
+fn canvas_heading(app: &App) -> String {
+    app.selected
+        .and_then(|selected| app.graph.node(selected))
+        .and_then(|node| node.location.as_ref())
+        .map(|location| location.uri.trim())
+        .filter(|uri| !uri.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "CALL GRAPH".to_owned())
 }
 
 fn analysis_status_line(status: &AnalysisStatus) -> Line<'static> {
@@ -855,7 +867,6 @@ fn analysis_status_line(status: &AnalysisStatus) -> Line<'static> {
         .map(|percentage| format!(" {percentage}%"))
         .unwrap_or_default();
     let mut content = vec![
-        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled(backend, backend_style),
         Span::styled(" · ", Style::default().fg(Color::DarkGray)),
         Span::styled(phase, phase_style),
@@ -886,8 +897,9 @@ mod tests {
 
     use super::{
         CanvasDragState, EdgeVisualKind, InteractionRequest, NavigationDirection,
-        apply_ipc_command, apply_lsp_status, canvas_inner_area, canvas_layout, handle_canvas_key,
-        handle_canvas_mouse, move_canvas_selection, placement_bounds, rect_center, render,
+        apply_ipc_command, apply_lsp_status, canvas_heading, canvas_inner_area, canvas_layout,
+        handle_canvas_key, handle_canvas_mouse, move_canvas_selection, placement_bounds,
+        rect_center, render,
         search::{search_item, symbol_matches_search},
         send_open_location, with_stable_node_position, world_canvas_layout, world_rects_overlap,
     };
@@ -1030,6 +1042,13 @@ mod tests {
         assert!(!bottom_row.contains("w: save"));
         assert!(!bottom_row.contains("dd/dp/dn"));
         assert!(bottom_row.contains("Working 68%"));
+        assert_eq!(
+            bottom_row
+                .chars()
+                .filter(|character| *character == '│')
+                .count(),
+            1
+        );
         for y in 0..height - 1 {
             let row = (0..width).fold(String::new(), |mut row, x| {
                 row.push_str(terminal.backend().buffer().cell((x, y)).unwrap().symbol());
@@ -1037,6 +1056,24 @@ mod tests {
             });
             assert!(!row.contains("LSP: rust-analyzer"));
         }
+    }
+
+    #[test]
+    fn canvas_heading_uses_the_default_label_or_selected_node_uri() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        assert_eq!(canvas_heading(&app), "CALL GRAPH");
+
+        let node = app.graph.pin_symbol(SymbolIdentity {
+            symbol: "main".to_owned(),
+            kind: HierarchyKind::Call,
+            location: Some(SourceLocation {
+                uri: "file:///workspace/src/main.rs".to_owned(),
+                line: Some(4),
+                character: Some(0),
+            }),
+        });
+        app.selected = Some(node);
+        assert_eq!(canvas_heading(&app), "file:///workspace/src/main.rs");
     }
 
     #[test]
@@ -1450,7 +1487,7 @@ mod tests {
         let child_id = connect(&mut app, root_id, HierarchyDirection::Outgoing, &["child"])[0];
         app.graph.node_mut(root_id).unwrap().outgoing.expanded = true;
         app.selected = Some(root_id);
-        let screen = Rect::new(0, 0, 38, 12);
+        let screen = Rect::new(0, 0, 36, 12);
         let canvas = canvas_inner_area(screen);
         let layout = canvas_layout(canvas, &app.graph, app.selected, app.viewport);
 

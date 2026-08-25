@@ -30,7 +30,7 @@ LSP $/progress / experimental/serverStatus
 
 分析状态和搜索状态必须分开：`AnalysisStatus::Working` 表示 server 报告的全局后台任务，`SearchStatus::Loading` 只表示当前 `workspace/symbol` 已发送。将两者合并会在索引期间隐藏搜索完成状态，也会把一次慢查询误写成整个连接不可用。
 
-footer 固定为一行，左侧约占 3/5 显示当前快捷键或 hierarchy 错误，右侧约占 2/5 显示 `backend · phase [percentage] · message`。两个 `Paragraph` 各自在自己的 `Rect` 内截断，因此长状态不会覆盖快捷键，也不再占用画布。LSP、Tree-sitter、phase 和消息使用不同颜色，但文本本身必须足以表达状态，不能只依赖颜色。
+footer 固定为一行，快捷键提示后紧接分隔符和 `backend · phase [percentage] · message` 状态摘要。它们使用同一个 `Paragraph` 和完整底栏宽度，避免在小终端中为状态固定预留 2/5 的空白区域；终端不足时由统一行自然裁剪。LSP、Tree-sitter、phase 和消息使用不同颜色，但文本本身必须足以表达状态，不能只依赖颜色。
 
 默认左侧只显示 `?`、添加、展开、移动和退出等高频入口。完整命令由帮助层维护；前缀等待时 footer 仍临时显示合法后缀，错误和最近操作 notice 仍优先于默认提示。帮助清单和生产键位在同一 TUI 模块维护，新增快捷键时必须同步其测试与用户文档。
 
@@ -74,6 +74,8 @@ workspace symbol 响应包含多种符号。TUI 当前根据公共候选中的 `
 候选结构已经提升到 Fetch 公共层，并由 LSP/Tree-sitter client 共同返回。`SymbolKind` 仍沿用 LSP 枚举作为跨 provider 分类；如果未来增加无法自然映射的分析器，应再引入项目自己的 symbol-kind，而不是让 TUI 增加 provider 分支。
 
 ## 画布布局与连线
+
+画布使用底栏以上的完整区域，不再绘制最外层 `cgraph` 边框。左上角以无边框标题显示 `CALL GRAPH`；当当前选择拥有精确 `SourceLocation` 时，标题改为该节点的文件 URI。标题不参与节点世界布局，因此选择、展开和拖拽不会因为标题发生额外位移。
 
 画布先从 RelationGraph 的 anchors 和 expanded branches 生成可见图，再对可见图计算强连通分量。SCC 收缩后的 DAG 使用最长前驱路径分配水平 rank；caller/parent 的规范 source 位于左侧，callee/child 的 target 位于右侧。同一 SCC 内部、自环或布局后不满足 source-left-of-target 的边标记为非前向边。
 
