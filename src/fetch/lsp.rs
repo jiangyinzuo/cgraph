@@ -3,6 +3,7 @@
 //! The transport is implemented locally because `tower-lsp` supplies protocol
 //! types and server infrastructure, but cgraph needs to act as an LSP client.
 
+mod clangd;
 mod pyrefly;
 mod symbol_names;
 
@@ -660,6 +661,32 @@ impl LspProvider {
                         )
                         .await
                         .context("failed to open Pyrefly index bootstrap document")?;
+                    Some(document.uri)
+                }
+                None => None,
+            }
+        } else if is_clangd_program(&config.program)
+            || initialize_result
+                .server_info
+                .as_ref()
+                .is_some_and(|info| info.name.eq_ignore_ascii_case("clangd"))
+        {
+            match clangd::bootstrap_document(&workspace_root) {
+                Some(document) => {
+                    client
+                        .notify(
+                            "textDocument/didOpen",
+                            DidOpenTextDocumentParams {
+                                text_document: TextDocumentItem {
+                                    uri: document.uri.clone(),
+                                    language_id: document.language_id.to_owned(),
+                                    version: 0,
+                                    text: document.text,
+                                },
+                            },
+                        )
+                        .await
+                        .context("failed to open clangd index bootstrap document")?;
                     Some(document.uri)
                 }
                 None => None,
@@ -1378,6 +1405,15 @@ fn is_pyrefly_program(program: &OsStr) -> bool {
         .to_string_lossy()
         .trim_end_matches(".exe")
         .eq_ignore_ascii_case("pyrefly")
+}
+
+fn is_clangd_program(program: &OsStr) -> bool {
+    Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy()
+        .trim_end_matches(".exe")
+        .eq_ignore_ascii_case("clangd")
 }
 
 fn symbol_leaf_name(symbol: &str) -> &str {
@@ -2532,6 +2568,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn integrates_with_installed_clangd_workspace_symbols() {
+        if !external_server_available("clangd").await {
+            eprintln!("skipping real clangd integration test: clangd is not in PATH");
+            return;
+        }
+
+        let workspace = external_server_workspace("clangd");
+        let source = workspace.join("src/main.cpp");
+        fs::create_dir(workspace.join("src")).unwrap();
+        fs::write(
+            workspace.join("compile_commands.json"),
+            serde_json::to_vec(&vec![json!({
+                "directory": workspace,
+                "file": source,
+                "arguments": [
+                    "clang++",
+                    "-std=c++17",
+                    "-Wall",
+                    "-c",
+                    source,
+                ],
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &source,
+            "namespace demo {\nclass Worker { public: void run(); };\nvoid Worker::run() {}\n}\n\nvoid helper() {}\nint main() { helper(); return 0; }\n",
+        )
+        .unwrap();
+
+        let lsp = timeout(
+            Duration::from_secs(60),
+            LspProvider::start(LspConfig::for_server("clangd", &workspace)),
+        )
+        .await
+        .expect("clangd initialization timed out")
+        .unwrap();
+
+        let method = wait_for_workspace_symbol_leaf(&lsp, "run").await;
+        assert_eq!(method.name, "demo::Worker::run");
+        assert_eq!(method.kind, SymbolKind::METHOD);
+        assert_eq!(method.uri, Url::from_file_path(&source).unwrap());
+        assert!(method.range.is_some());
+
+        let main = wait_for_workspace_symbol(&lsp, "main").await;
+        assert_eq!(main.name, "main");
+        assert_eq!(main.kind, SymbolKind::FUNCTION);
+        assert_eq!(main.uri, Url::from_file_path(&source).unwrap());
+
+        lsp.shutdown().await.unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
     async fn rejects_oversized_messages() {
         use tokio::io::AsyncWriteExt;
 
@@ -2579,6 +2670,28 @@ mod tests {
                     .unwrap()
                     .into_iter()
                     .find(|symbol| symbol.name == expected_name)
+                {
+                    return symbol;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{expected_name:?} did not appear in workspace symbols"))
+    }
+
+    async fn wait_for_workspace_symbol_leaf(
+        lsp: &LspProvider,
+        expected_name: &str,
+    ) -> WorkspaceSymbolMatch {
+        timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(symbol) = lsp
+                    .workspace_symbols(expected_name)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|symbol| symbol_leaf_name(&symbol.name) == expected_name)
                 {
                     return symbol;
                 }

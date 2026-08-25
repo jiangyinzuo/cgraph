@@ -38,6 +38,12 @@ Pyrefly 的 lazy index 不会仅由 initialize 和 `workspace/symbol` 建立。i
 
 Pyrefly 的 call hierarchy 把短方法名放在 `name`，把 `module.Class.method` 放在 `detail`。只有 Pyrefly adapter 会解释这个非结构化字段：方法和构造器提取最后两个合法 Python identifier，显示为 `Class.method`；模块函数保持短名，包含路径、签名或非法标识符的 detail 原样降级。workspace symbol 若提供 `containerName` 也使用点号，但 Pyrefly 当前主要返回顶层导出符号，cgraph 不枚举 server 没有返回的类成员。
 
+## clangd
+
+部分 clangd 版本只有在至少一个项目源文件经过 `textDocument/didOpen` 后，才会开始提供可用的 workspace symbol 索引；仅发送 initialize 和 `workspace/symbol` 可能持续返回空数组，即使工作区存在 `compile_commands.json`。initialize 完成后，provider 因此会在 C/C++ 工作区确定性查找一个不超过 4 MiB 的 `.c` / `.cc` / `.cpp` / `.cxx` 文件，发送一次 `didOpen`，并在 shutdown 时发送对应的 `didClose`。这只是触发 clangd 的后台索引，不把源码 overlay 当作用户编辑内容，也不会发送 `didChange` 或 `didSave`。
+
+扫描跳过隐藏目录、构建目录、`target`、`node_modules` 和符号链接，并限制为 10,000 个目录项。找不到合适源文件时会话仍可启动；若要让 clangd 在大型工程中更积极地预建索引，可通过 `--lsp-arg=--background-index` 显式启用。真实 clangd 集成测试使用最小 `compile_commands.json`，验证方法的命名空间限定名和顶层函数，同时通过工作区 URI 过滤掉依赖头文件。
+
 没有源码位置的 CLI 根会先去掉最后一个 `::` 或 `.` 限定段，再进行 workspace-symbol 定位。因此 Python 输入可以使用惯用 `Class.method`，也兼容已有通用输入。Pyrefly 目前要求 workspace-symbol query 至少 3 个字符；客户端仍发送空文本和短 query，以保持 provider 接口与搜索生命周期一致，空响应不会被解释成能力缺失。
 
 旧版或其他封装形式若直接在 `detail` 中提供 `impl` 描述，Rust adapter 仍可把它作为降级来源。解析保持保守：不完整的泛型、函数签名、文件路径和空文本都不会用于限定名称。document symbol 请求不支持、失败或没有匹配容器时，hierarchy 查询本身仍然成功并保留短方法名，避免命名增强破坏基础导航。
