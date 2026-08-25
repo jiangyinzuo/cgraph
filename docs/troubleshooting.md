@@ -31,6 +31,7 @@ cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状�
 - 工作区根目录选择错误。
 - 目标位于第三方依赖或工作区根目录之外；默认项目范围会主动排除它。
 - workspace 根目录的 `.cgraph.toml` 匹配了该完整显示名；临时移除对应模式并重启可确认。
+- 默认只展示 workspace 根目录内的符号；需要查看依赖或系统头文件时，在 `.cgraph.toml` 中设置 `[filters].workspace_only = false`。关闭后外部 hierarchy 仍可能受语言服务器的 `didOpen` 要求限制。
 - server 对单次 workspace symbol 响应设有数量上限；输入更精确的查询可以缩小结果集。
 - server 自身的 workspace symbol 能力未覆盖该语言或文件。
 - Pyrefly 当前要求 workspace-symbol query 至少包含 3 个字符；更短输入会由 server 返回空结果。

@@ -49,14 +49,14 @@ total: 119
 | `src/app/config.rs` | 1 | 配置重载状态机测试 | 全部成功空/已加载/正在刷新分支、新 request id、过滤应用、anchor 保留与迟到结果拒绝 |
 | `src/app/save.rs` | 1 | 保存状态单元测试 | 路径编辑、错误保留与再次编辑恢复 |
 | `src/cli.rs` | 4 | 解析测试 | call 子命令、空画布、LSP 参数位置、IPC socket 路径 |
-| `src/config/mod.rs` | 2 | 配置与匹配单元测试 | 缺省加载、严格 TOML、模式规范化、大小写和 `*` 通配符 |
+| `src/config/mod.rs` | 2 | 配置与匹配单元测试 | 缺省加载、严格 TOML、默认项目范围、模式规范化、大小写和 `*` 通配符 |
 | `src/export/mod.rs` | 3 | 序列化与文件系统测试 | 稳定人类可读格式、共享节点/循环、空路径、安全创建与禁止覆盖 |
-| `src/fetch/lsp.rs` | 16 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、call/type hierarchy、动态 capability、未注册 type hierarchy 的 Tree-sitter 回退、Pyrefly/clangd 命令与索引 bootstrap、取消、进度、安全限制、UTF-16 position 协商，以及条件执行的真实 Pyrefly/rust-analyzer/clangd 最小工作区 |
+| `src/fetch/lsp.rs` | 16 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、call/type hierarchy、项目外 hierarchy URI 过滤（含 clangd `printf` 头文件回归）、动态 capability、未注册 type hierarchy 的 Tree-sitter 回退、Pyrefly/clangd 命令与索引 bootstrap、取消、进度、安全限制、UTF-16 position 协商，以及条件执行的真实 Pyrefly/rust-analyzer/clangd 最小工作区 |
 | `src/fetch/lsp/symbol_names.rs` | 5 | LSP 方言适配单元测试 | server 识别、Rust inherent/trait impl、Pyrefly 点号限定名、非法 detail 降级、通用协议边界 |
 | `src/fetch/treesitter.rs` | 9 | 文件系统与静态索引集成测试 | 语言检测、四种 grammar、Rust/Python/C/C++ 符号与调用、Rust/C++/Python 类型关系、限定方法名、UTF-16 列归一化、目录排除、歧义拒绝和取消安全的单次索引 |
 | `src/ipc/tests.rs` | 5 | Unix socket 异步集成测试 | 私有父目录、`0600` 权限、多客户端广播、请求路由与相同 request id 响应、版本拒绝、1 MiB 入站限制、陈旧 socket 回收和 inode 保护 |
 | `src/ipc/protocol.rs` | 2 | 序列化契约测试 | 版本化 tagged request、无 request id 的 UTF-16 零基打开位置事件 |
-| `src/main.rs` | 2 | 组装/降级测试 | Python 默认 Pyrefly、显式 pylsp 覆盖、Tree-sitter fallback 与统一状态 |
+| `src/main.rs` | 2 | 组装/降级测试 | Python 默认 Pyrefly、显式 pylsp 覆盖、默认 workspace-only LSP 配置、Tree-sitter fallback 与统一状态 |
 | `src/state/graph.rs` | 9 | 图领域模型单元测试 | 菱形全局去重、双向边观察、循环、自环、身份解析、边迁移、共享边清除、可见/已知图投影 |
 | `src/tui/canvas/connections.rs` | 4 | 连线几何与渲染单元测试 | 正交圆角、真实普通交叉高亮、单/双线 `╪` / `╫` 轴向语义、极远线段先裁剪后栅格化 |
 | `src/tui/config_editor.rs` | 2 | 外部进程与选择单元测试 | `$EDITER` 优先、`$EDITOR` 回退、缺失诊断、真实子进程收到准确配置路径和最小模板 |
@@ -103,6 +103,7 @@ LSP 测试使用 `tokio::io::duplex` 连接真实 `JsonRpcClient` actor 与测�
 - JSON 编解码与 request id 路由。
 - server 通知和反向请求与普通响应并发出现。
 - `prepareCallHierarchy` 后继续 incoming/outgoing 请求。
+- hierarchy 返回的系统头文件/第三方 URI 在转换节点前被过滤，避免对 clangd 未 `didOpen` 的外部文档发起后续请求。
 - `prepareTypeHierarchy` 后继续 supertypes/subtypes 请求。
 - type hierarchy 的动态注册/注销会改变可用能力；未注册时混合 client 不向 LSP 发送请求，并由 Rust Tree-sitter trait impl fixture 返回 parent。
 - prepare item 中的协议数据传入第二阶段请求。

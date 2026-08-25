@@ -69,7 +69,7 @@ cgraph --workspace .
 
 搜索框中的路径和行号来自当前分析 provider，内部使用从零开始的行列号保存，界面行号按从一开始显示。候选默认限定在 `--workspace` 指定的项目目录内，第三方依赖符号不会显示。
 
-如果 `into`、`is_some` 等通用方法淹没了项目关系，可以在 workspace 根目录添加 `.cgraph.toml`。方法会尽可能以 `Class::method` 显示，配置可用 `*::is_some` 过滤任意类的同名方法；也可以设置 `$EDITER` 后在 Canvas 输入 `ec`，编辑器返回时自动重载并刷新已加载图。完整格式见[项目配置](project-configuration.md)。
+如果 `into`、`is_some` 等通用方法淹没了项目关系，可以在 workspace 根目录添加 `.cgraph.toml`。默认搜索和 hierarchy 只保留项目内符号；如需显示系统头文件或第三方依赖，可将 `[filters].workspace_only` 设为 `false`。方法会尽可能以 `Class::method` 显示，配置可用 `*::is_some` 过滤任意类的同名方法；也可以设置 `$EDITER` 后在 Canvas 输入 `ec`，编辑器返回时自动重载并刷新已加载图。完整格式见[项目配置](project-configuration.md)。
 
 底部状态摘要描述整个分析后端，搜索弹窗中的 `Waiting for typing pause…` / `Searching workspace symbols…` 只描述当前搜索。即使 LSP 后端显示 `Working`，也可以尝试搜索；结果是否完整取决于语言服务器当时已经建立的索引。
 

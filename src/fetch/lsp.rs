@@ -66,6 +66,7 @@ pub struct LspConfig {
     pub args: Vec<OsString>,
     pub workspace_root: PathBuf,
     pub initialization_options: Option<Value>,
+    pub workspace_only: bool,
 }
 
 impl LspConfig {
@@ -75,6 +76,7 @@ impl LspConfig {
             args: Vec::new(),
             workspace_root: workspace_root.into(),
             initialization_options: None,
+            workspace_only: true,
         }
     }
 
@@ -108,6 +110,11 @@ impl LspConfig {
 
     pub fn initialization_options(mut self, options: Value) -> Self {
         self.initialization_options = Some(options);
+        self
+    }
+
+    pub fn workspace_only(mut self, workspace_only: bool) -> Self {
+        self.workspace_only = workspace_only;
         self
     }
 }
@@ -151,6 +158,7 @@ pub struct WorkspaceSymbolClient {
     client: JsonRpcClient,
     workspace_root: PathBuf,
     symbol_names: SymbolNameAdapter,
+    workspace_only: bool,
 }
 
 impl fmt::Debug for WorkspaceSymbolClient {
@@ -177,8 +185,12 @@ impl WorkspaceSymbolClient {
             .map(|response| normalize_symbols(response, self.symbol_names))
             .unwrap_or_default();
         Ok(deduplicate_symbols(symbols.into_iter().filter(|symbol| {
-            symbol_belongs_to_workspace(symbol, &self.workspace_root)
+            workspace_symbol_is_visible(symbol, &self.workspace_root, self.workspace_only)
         })))
+    }
+
+    pub fn set_workspace_only(&mut self, workspace_only: bool) {
+        self.workspace_only = workspace_only;
     }
 }
 
@@ -189,6 +201,7 @@ pub struct HierarchyClient {
     symbol_names: SymbolNameAdapter,
     document_symbols: DocumentSymbolCache,
     capabilities: Arc<ServerHierarchyCapabilities>,
+    workspace_only: bool,
 }
 
 type DocumentSymbolCache = Arc<Mutex<HashMap<Url, Arc<OnceCell<Vec<DocumentSymbolOwner>>>>>>;
@@ -312,6 +325,7 @@ impl HierarchyClient {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
             symbol_names: self.symbol_names,
+            workspace_only: self.workspace_only,
         }
         .query(lookup_name)
         .await?
@@ -414,7 +428,9 @@ impl HierarchyClient {
         items: Vec<CallHierarchyItem>,
     ) -> Result<Vec<SymbolIdentity>> {
         let mut identities = Vec::with_capacity(items.len());
-        for item in items {
+        for item in items.into_iter().filter(|item| {
+            !self.workspace_only || uri_belongs_to_workspace(&item.uri, &self.workspace_root)
+        }) {
             let container = if self.symbol_names.uses_document_symbols() {
                 self.document_symbol_container(&item).await
             } else {
@@ -518,8 +534,15 @@ impl HierarchyClient {
         Ok(items
             .unwrap_or_default()
             .into_iter()
+            .filter(|item| {
+                !self.workspace_only || uri_belongs_to_workspace(&item.uri, &self.workspace_root)
+            })
             .map(type_item_identity)
             .collect())
+    }
+
+    pub fn set_workspace_only(&mut self, workspace_only: bool) {
+        self.workspace_only = workspace_only;
     }
 }
 
@@ -534,6 +557,7 @@ pub struct LspProvider {
     hierarchy_capabilities: Arc<ServerHierarchyCapabilities>,
     bootstrap_document: Option<Url>,
     status_receiver: Option<mpsc::UnboundedReceiver<LspStatusUpdate>>,
+    workspace_only: bool,
 }
 
 impl fmt::Debug for LspProvider {
@@ -705,6 +729,7 @@ impl LspProvider {
             hierarchy_capabilities,
             bootstrap_document,
             status_receiver: Some(status_receiver),
+            workspace_only: config.workspace_only,
         })
     }
 
@@ -727,6 +752,7 @@ impl LspProvider {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
             symbol_names: self.symbol_names,
+            workspace_only: self.workspace_only,
         }
     }
 
@@ -737,6 +763,7 @@ impl LspProvider {
             symbol_names: self.symbol_names,
             document_symbols: Arc::clone(&self.document_symbols),
             capabilities: Arc::clone(&self.hierarchy_capabilities),
+            workspace_only: self.workspace_only,
         }
     }
 
@@ -1497,9 +1524,19 @@ fn merge_json(target: &mut Value, overlay: Value) {
 }
 
 fn symbol_belongs_to_workspace(symbol: &WorkspaceSymbolMatch, workspace_root: &Path) -> bool {
-    symbol
-        .uri
-        .to_file_path()
+    uri_belongs_to_workspace(&symbol.uri, workspace_root)
+}
+
+fn workspace_symbol_is_visible(
+    symbol: &WorkspaceSymbolMatch,
+    workspace_root: &Path,
+    workspace_only: bool,
+) -> bool {
+    !workspace_only || symbol_belongs_to_workspace(symbol, workspace_root)
+}
+
+fn uri_belongs_to_workspace(uri: &Url, workspace_root: &Path) -> bool {
+    uri.to_file_path()
         .is_ok_and(|path| path.starts_with(workspace_root))
 }
 
@@ -1807,7 +1844,7 @@ mod tests {
         WorkspaceSymbolMatch, client_capabilities, deduplicate_symbols, handle_server_notification,
         normalize_symbols, read_message, requested_configuration, response_id, spawn_json_rpc,
         symbol_belongs_to_workspace, symbol_leaf_name, uses_utf16_positions,
-        workspace_symbol_initialization_options, write_message,
+        workspace_symbol_initialization_options, workspace_symbol_is_visible, write_message,
     };
     use crate::fetch::treesitter::{TreeSitterLanguage, TreeSitterProvider};
     use crate::{
@@ -1819,6 +1856,7 @@ mod tests {
     fn excludes_symbols_outside_the_workspace() {
         let project_symbol = symbol("file:///workspace/src/main.rs");
         let dependency_symbol = symbol("file:///registry/dependency/src/lib.rs");
+        let sibling_symbol = symbol("file:///workspace-other/src/lib.rs");
 
         assert!(symbol_belongs_to_workspace(
             &project_symbol,
@@ -1827,6 +1865,20 @@ mod tests {
         assert!(!symbol_belongs_to_workspace(
             &dependency_symbol,
             Path::new("/workspace")
+        ));
+        assert!(!symbol_belongs_to_workspace(
+            &sibling_symbol,
+            Path::new("/workspace")
+        ));
+        assert!(workspace_symbol_is_visible(
+            &dependency_symbol,
+            Path::new("/workspace"),
+            false
+        ));
+        assert!(!workspace_symbol_is_visible(
+            &dependency_symbol,
+            Path::new("/workspace"),
+            true
         ));
     }
 
@@ -1873,6 +1925,11 @@ mod tests {
                 Some(json!({ "clangd": true })),
             ),
             Some(json!({ "clangd": true }))
+        );
+        assert!(
+            !LspConfig::for_server("clangd", "/workspace")
+                .workspace_only(false)
+                .workspace_only
         );
     }
 
@@ -1944,6 +2001,7 @@ mod tests {
             symbol_names: SymbolNameAdapter::RustAnalyzer,
             document_symbols: Default::default(),
             capabilities,
+            workspace_only: true,
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -1987,7 +2045,8 @@ mod tests {
                 "id": response_id(&outgoing).unwrap(),
                 "result": [
                     { "to": rust_method_item("child", 8), "fromRanges": [] },
-                    { "to": rust_method_item("child", 8), "fromRanges": [] }
+                    { "to": rust_method_item("child", 8), "fromRanges": [] },
+                    { "to": external_call_item("printf", 12), "fromRanges": [] }
                 ]
             }),
         )
@@ -2027,6 +2086,12 @@ mod tests {
         assert_eq!(response.children.len(), 1);
         assert_eq!(response.children[0].symbol, "Worker::child");
         assert_eq!(response.children[0].kind, HierarchyKind::Call);
+        assert!(
+            !response
+                .children
+                .iter()
+                .any(|child| child.symbol == "printf")
+        );
         assert_eq!(
             response.children[0].location.as_ref().unwrap().line,
             Some(8)
@@ -2076,6 +2141,7 @@ mod tests {
             symbol_names: SymbolNameAdapter::Standard,
             document_symbols: Default::default(),
             capabilities: Arc::clone(&capabilities),
+            workspace_only: true,
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -2183,6 +2249,7 @@ mod tests {
             symbol_names: SymbolNameAdapter::RustAnalyzer,
             document_symbols: Default::default(),
             capabilities,
+            workspace_only: true,
         };
         let hybrid = FetchHierarchyClient::with_fallback(lsp, tree_sitter.hierarchy_client());
 
@@ -2732,6 +2799,22 @@ mod tests {
         let mut item = call_item(name, line);
         item["detail"] = json!(format!("pub fn {name}(&self)"));
         item
+    }
+
+    fn external_call_item(name: &str, line: u32) -> Value {
+        json!({
+            "name": name,
+            "kind": 12,
+            "uri": "file:///usr/include/stdio.h",
+            "range": {
+                "start": { "line": line, "character": 0 },
+                "end": { "line": line, "character": name.len() }
+            },
+            "selectionRange": {
+                "start": { "line": line, "character": 0 },
+                "end": { "line": line, "character": name.len() }
+            }
+        })
     }
 
     fn type_item(name: &str, line: u32) -> Value {

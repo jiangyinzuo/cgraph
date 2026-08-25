@@ -47,7 +47,7 @@ footer 固定为最底部一行，快捷键提示后紧接分隔符和 `backend 
 
 完整 `ec` 产生 `EditConfig` interaction。协调层先调用与正常退出相同的 `restore`，让编辑器获得 cooked terminal、主屏幕、鼠标和光标；`config_editor` 优先读取 `$EDITER`，回退 `$EDITOR`，用 `Command` 直接传递 `.cgraph.toml` 路径并同步等待。无论启动或退出是否成功，协调层都先 `resume` raw mode、备用屏幕和鼠标捕获，再把错误写入 footer。
 
-只有零退出状态才调用严格 `ProjectConfig::load`。成功后 `App::reload_symbol_filter` 为 `known_graph` 中所有 `Loaded` / `Loading` 分支生成 `CachePolicy::Refresh` 请求；成功空缓存也必须刷新，才能在放宽过滤规则后发现新关系。新 request id 会拒绝编辑期间排队的旧结果。外部编辑器 I/O 不进入 App，配置 loader 不依赖终端，图刷新也不依赖进程 API。
+只有零退出状态才调用严格 `ProjectConfig::load`。成功后 `App::reload_symbol_filter` 为 `known_graph` 中所有 `Loaded` / `Loading` 分支生成 `CachePolicy::Refresh` 请求，同时把 `filters.workspace_only` 应用到当前 LSP workspace-symbol 和 hierarchy client；成功空缓存也必须刷新，才能在放宽过滤规则后发现新关系。新 request id 会拒绝编辑期间排队的旧结果。外部编辑器 I/O 不进入 App，配置 loader 不依赖终端，图刷新也不依赖进程 API。
 
 Tree-sitter fallback 在 `main` 中完成语言检测和 grammar/query 初始化，通过同一个通用状态入口报告 working、ready 和 error；TUI 不解释 Tree-sitter API。第一次搜索或展开的索引时间体现在对应 modal/branch 的 loading 状态，Tree-sitter hierarchy 成功后的语法级置信度由 App 写入消息摘要与历史。
 

@@ -67,6 +67,12 @@ pub enum WorkspaceSymbolClient {
 }
 
 impl WorkspaceSymbolClient {
+    pub fn set_workspace_only(&mut self, workspace_only: bool) {
+        if let Self::Lsp(client) = self {
+            client.set_workspace_only(workspace_only);
+        }
+    }
+
     pub async fn query(&self, query: &str) -> anyhow::Result<Vec<WorkspaceSymbolMatch>> {
         match self {
             Self::Lsp(client) => client.query(query).await,
@@ -98,6 +104,14 @@ pub enum HierarchyClient {
 }
 
 impl HierarchyClient {
+    pub fn set_workspace_only(&mut self, workspace_only: bool) {
+        match self {
+            Self::Lsp(client) => client.set_workspace_only(workspace_only),
+            Self::TreeSitter(_) => {}
+            Self::Hybrid { lsp, .. } => lsp.set_workspace_only(workspace_only),
+        }
+    }
+
     pub fn with_fallback(lsp: LspHierarchyClient, tree_sitter: TreeSitterHierarchyClient) -> Self {
         Self::Hybrid { lsp, tree_sitter }
     }

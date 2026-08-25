@@ -1,11 +1,12 @@
 # 项目配置
 
-cgraph 会读取 `--workspace` 根目录中的 `.cgraph.toml`。该文件适合提交到项目版本库，使团队成员看到一致的关系图；没有这个文件时不启用任何符号过滤。
+cgraph 会读取 `--workspace` 根目录中的 `.cgraph.toml`。该文件适合提交到项目版本库，使团队成员看到一致的关系图；没有这个文件时仍默认只展示项目内符号，符号名过滤规则保持为空。
 
 ## 过滤符号
 
 ```toml
 [filters]
+workspace_only = true
 symbols = [
   "*::into",
   "Option::is_some",
@@ -13,6 +14,15 @@ symbols = [
   "*.run",
 ]
 ```
+
+`filters.workspace_only` 默认是 `true`，会同时限制 workspace symbol 搜索和 LSP hierarchy 返回项：只有位于当前 workspace 根目录下的 `file://` URI 才会进入图。若确实需要查看语言服务器返回的系统头文件或第三方依赖，可以设置：
+
+```toml
+[filters]
+workspace_only = false
+```
+
+关闭范围过滤只表示 cgraph 保留这些外部节点；外部节点能否继续展开仍取决于语言服务器的文档生命周期要求。比如 clangd 可能要求客户端先打开系统头文件，展开 `printf` 仍可能返回 `trying to get AST for non-added document`。
 
 规则针对界面中的完整显示名，并且必须匹配整个名称：
 
@@ -31,8 +41,10 @@ symbols = [
 Canvas 模式输入 `ec` 会离开备用屏幕，并用 `$EDITER` 打开当前 workspace 的 `.cgraph.toml`。项目没有配置文件时，cgraph 先用 `create_new` 创建以下最小有效模板，不覆盖已经存在的文件：
 
 ```toml
-# Full symbol names; * matches any number of characters.
 [filters]
+# Keep discovered symbols inside the project root.
+workspace_only = true
+# Full symbol names; * matches any number of characters.
 symbols = []
 ```
 

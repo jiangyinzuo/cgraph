@@ -19,6 +19,8 @@ rust-analyzer 的进程模型、冷索引原因与未来复用路线单独记录
 
 LSP workspace symbol 与 hierarchy 客户端复用同一个 actor 和语言服务器进程；Tree-sitter 两种客户端复用同一个惰性静态索引，都不会为不同请求类型重复建立后端状态。
 
+LSP actor 的协议边界保持通用：它发送标准 initialize、initialized、workspace/document symbol 和 call/type hierarchy 请求，不把某个 server 的私有索引行为暴露给 App 或 TUI。当前为部分 server 保留的 bootstrap 文档属于临时兼容 profile；未来应从 `.cgraph.toml` 或独立 server 配置加载程序、参数、初始化选项、根标记和可选 bootstrap 策略。新增语言服务器时，优先实现 profile/adaptor，而不是在通用 actor 中增加按程序名分支。
+
 ## VS Code 式 workspace symbol 查询
 
 `WorkspaceSymbolClient::query` 把当前完整文本直接交给 server，不尝试枚举完整索引，也允许空字符串。TUI 负责与 VS Code 相同的约 200 ms 防抖节奏；Fetch 层只负责一次查询的协议语义。server 返回后先删除完全相同的符号，再按 URI 做项目范围过滤：只有能够转换为本地文件路径且位于 canonical workspace root 下的符号才保留。
@@ -71,7 +73,7 @@ rust-analyzer `experimental/serverStatus` 的 `health=warning/error` 映射为�
 
 `HierarchyQuery` 描述语义符号、call/type 模式和 incoming/outgoing 方向；`HierarchyResponse` 记录归一化孩子和数据来源。`HierarchyClient` 对精确位置执行标准两阶段请求；CLI 根没有位置时，先执行 workspace symbol 精确解析，同名候选不唯一则返回错误而不是任选一个重载。
 
-call hierarchy 使用 prepare 后的 `CallHierarchyItem` 请求 incoming/outgoing calls；type hierarchy 使用 `TypeHierarchyItem` 请求 supertypes/subtypes。协议 item 的 `data` 在第二阶段请求中保留。`detail` 不是结构化容器字段，只能由对应 LSP adapter 解释；当前 rust-analyzer 会把方法标成 `Function` 并把签名放在 `detail`，所以 Rust adapter 额外按文件请求并缓存 document symbols，用标准 `containerName` 生成 `Type::name`，失败时保留原名。Fetch 会按 `SymbolIdentity` 去重 provider 响应，App 在写入 incoming/outgoing 缓存前应用项目过滤并做防御性分支内去重；State 按层次类型与源码位置全局复用同一 `NodeId`，同时保留不同方向观察到的边。
+call hierarchy 使用 prepare 后的 `CallHierarchyItem` 请求 incoming/outgoing calls；type hierarchy 使用 `TypeHierarchyItem` 请求 supertypes/subtypes。协议 item 的 `data` 在第二阶段请求中保留。`detail` 不是结构化容器字段，只能由对应 LSP adapter 解释；当前 rust-analyzer 会把方法标成 `Function` 并把签名放在 `detail`，所以 Rust adapter 额外按文件请求并缓存 document symbols，用标准 `containerName` 生成 `Type::name`，失败时保留原名。LSP hierarchy 的返回项与 workspace symbol 使用同一项目范围策略：默认只有 `file://` URI 且路径位于 canonical workspace root 下的项才进入 `HierarchyResponse`；`.cgraph.toml` 的 `[filters].workspace_only = false` 可以关闭这一范围过滤。这样 clangd 从项目函数返回 `/usr/include` 中的 `printf` 时，默认不会把未 `didOpen` 的系统头文件加入图，也不会在用户展开它时触发 `trying to get AST for non-added document`；项目内文件的协议错误仍原样反馈给消息 pager。Fetch 会按 `SymbolIdentity` 去重 provider 响应，App 在写入 incoming/outgoing 缓存前应用项目过滤并做防御性分支内去重；State 按层次类型与源码位置全局复用同一 `NodeId`，同时保留不同方向观察到的边。
 
 call hierarchy 可以在 initialize result 中静态声明，也可以动态注册；type hierarchy 在 LSP 3.17 中只通过 `client/registerCapability` 注册。客户端将两项 `dynamicRegistration` 声明为 `true`，actor 按 registration id 追踪注册与注销。查询发出前必须检查当前能力，未声明的方法不能靠“试一次并接受 `-32601`”探测，因为这会把可预知的能力缺失污染为用户错误。
 

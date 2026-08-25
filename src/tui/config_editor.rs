@@ -18,6 +18,11 @@ pub(super) struct EditorOutcome {
     pub status: ExitStatus,
 }
 
+pub(super) struct ConfigReload {
+    pub requests: Vec<HierarchyLoadRequest>,
+    pub workspace_only: bool,
+}
+
 pub(super) fn open(workspace: &Path) -> Result<EditorOutcome> {
     let editor = select_editor(std::env::var_os("EDITER"), std::env::var_os("EDITOR"))?;
     open_with_editor(&editor, workspace)
@@ -27,7 +32,7 @@ pub(super) fn edit_project_config(
     terminal: &mut Tui,
     app: &mut App,
     hierarchy_available: bool,
-) -> Result<Vec<HierarchyLoadRequest>> {
+) -> Result<Option<ConfigReload>> {
     restore(terminal)?;
     let edit_result = open(&app.workspace);
     resume(terminal)?;
@@ -36,7 +41,7 @@ pub(super) fn edit_project_config(
         Ok(outcome) => outcome,
         Err(error) => {
             app.set_canvas_error(format!("Project config editor failed: {error:#}"));
-            return Ok(Vec::new());
+            return Ok(None);
         }
     };
     if !outcome.status.success() {
@@ -44,7 +49,7 @@ pub(super) fn edit_project_config(
             "Project config editor exited with {}",
             outcome.status
         ));
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let config = match ProjectConfig::load(&app.workspace) {
         Ok(config) => config,
@@ -53,10 +58,15 @@ pub(super) fn edit_project_config(
                 "Project config reload failed for {}: {error:#}",
                 outcome.path.display()
             ));
-            return Ok(Vec::new());
+            return Ok(None);
         }
     };
-    Ok(app.reload_symbol_filter(config.symbol_filter, hierarchy_available))
+    let workspace_only = config.workspace_only;
+    let requests = app.reload_symbol_filter(config.symbol_filter, hierarchy_available);
+    Ok(Some(ConfigReload {
+        requests,
+        workspace_only,
+    }))
 }
 
 fn open_with_editor(editor: &OsStr, workspace: &Path) -> Result<EditorOutcome> {

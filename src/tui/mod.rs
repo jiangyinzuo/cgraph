@@ -137,8 +137,8 @@ fn set_mouse_capture(terminal: &mut Tui, enabled: bool) -> Result<()> {
 pub fn run(
     terminal: &mut Tui,
     app: &mut App,
-    symbol_client: Option<WorkspaceSymbolClient>,
-    hierarchy_client: Option<HierarchyClient>,
+    mut symbol_client: Option<WorkspaceSymbolClient>,
+    mut hierarchy_client: Option<HierarchyClient>,
     mut lsp_status_receiver: Option<UnboundedReceiver<LspStatusUpdate>>,
     ipc_event_sender: Option<IpcEventSender>,
     mut ipc_command_receiver: Option<tokio::sync::mpsc::Receiver<IpcCommand>>,
@@ -224,18 +224,26 @@ pub fn run(
                     send_open_location(app, ipc_event_sender.as_ref(), &location);
                 }
                 Some(InteractionRequest::EditConfig) => {
-                    let requests = config_editor::edit_project_config(
+                    let reload = config_editor::edit_project_config(
                         terminal,
                         app,
                         hierarchy_client.is_some(),
                     )?;
-                    if let Some(client) = hierarchy_client.clone() {
-                        for request in requests {
-                            hierarchy_tasks.push(schedule_hierarchy(
-                                client.clone(),
-                                request,
-                                hierarchy_sender.clone(),
-                            ));
+                    if let Some(reload) = reload {
+                        if let Some(client) = symbol_client.as_mut() {
+                            client.set_workspace_only(reload.workspace_only);
+                        }
+                        if let Some(client) = hierarchy_client.as_mut() {
+                            client.set_workspace_only(reload.workspace_only);
+                        }
+                        if let Some(client) = hierarchy_client.clone() {
+                            for request in reload.requests {
+                                hierarchy_tasks.push(schedule_hierarchy(
+                                    client.clone(),
+                                    request,
+                                    hierarchy_sender.clone(),
+                                ));
+                            }
                         }
                     }
                 }

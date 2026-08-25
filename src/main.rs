@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     let workspace = cli.workspace.clone();
     let ipc_socket = cli.ipc_socket.clone();
     let project_config = ProjectConfig::load(&workspace)?;
-    let lsp_config = lsp_config(&cli);
+    let lsp_config = lsp_config(&cli, project_config.workspace_only);
     let mut app = App::from_cli(cli);
     app.set_symbol_filter(project_config.symbol_filter);
     let mut ipc_server = match ipc_socket {
@@ -147,7 +147,7 @@ fn start_tree_sitter_hierarchy_fallback(workspace: &Path) -> Option<TreeSitterPr
     TreeSitterProvider::start(workspace, language).ok()
 }
 
-fn lsp_config(cli: &Cli) -> Option<LspConfig> {
+fn lsp_config(cli: &Cli, workspace_only: bool) -> Option<LspConfig> {
     if cli.no_lsp {
         return None;
     }
@@ -156,7 +156,11 @@ fn lsp_config(cli: &Cli) -> Option<LspConfig> {
         .lsp
         .clone()
         .or_else(|| detect_language_server(&cli.workspace))?;
-    Some(LspConfig::for_server(program, &cli.workspace).args(cli.lsp_args.clone()))
+    Some(
+        LspConfig::for_server(program, &cli.workspace)
+            .workspace_only(workspace_only)
+            .args(cli.lsp_args.clone()),
+    )
 }
 
 fn detect_language_server(workspace: &Path) -> Option<OsString> {
@@ -284,9 +288,10 @@ mod tests {
 
         let detected =
             Cli::try_parse_from(["cgraph", "--workspace", workspace.to_str().unwrap()]).unwrap();
-        let detected = lsp_config(&detected).unwrap();
+        let detected = lsp_config(&detected, true).unwrap();
         assert_eq!(detected.program, "pyrefly");
         assert_eq!(detected.args, ["lsp"].map(std::ffi::OsString::from));
+        assert!(detected.workspace_only);
 
         let explicit = Cli::try_parse_from([
             "cgraph",
@@ -296,7 +301,7 @@ mod tests {
             "pylsp",
         ])
         .unwrap();
-        let explicit = lsp_config(&explicit).unwrap();
+        let explicit = lsp_config(&explicit, true).unwrap();
         assert_eq!(explicit.program, "pylsp");
         assert!(explicit.args.is_empty());
 

@@ -10,8 +10,11 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 pub const PROJECT_CONFIG_FILE: &str = ".cgraph.toml";
-const PROJECT_CONFIG_TEMPLATE: &str =
-    "# Full symbol names; * matches any number of characters.\n[filters]\nsymbols = []\n";
+const PROJECT_CONFIG_TEMPLATE: &str = "[filters]\n\
+# Keep discovered symbols inside the project root.\n\
+workspace_only = true\n\
+# Full symbol names; * matches any number of characters.\n\
+symbols = []\n";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SymbolFilter {
@@ -70,9 +73,19 @@ fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
     previous[candidate.len()]
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectConfig {
     pub symbol_filter: SymbolFilter,
+    pub workspace_only: bool,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            symbol_filter: SymbolFilter::default(),
+            workspace_only: true,
+        }
+    }
 }
 
 impl ProjectConfig {
@@ -113,6 +126,7 @@ impl ProjectConfig {
         Ok(Self {
             symbol_filter: SymbolFilter::from_patterns(raw.filters.symbols)
                 .with_context(|| format!("{} contains invalid filters.symbols", path.display()))?,
+            workspace_only: raw.filters.workspace_only,
         })
     }
 }
@@ -123,10 +137,20 @@ struct RawProjectConfig {
     filters: RawFilters,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawFilters {
     symbols: Vec<String>,
+    workspace_only: bool,
+}
+
+impl Default for RawFilters {
+    fn default() -> Self {
+        Self {
+            symbols: Vec::new(),
+            workspace_only: true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -143,12 +167,13 @@ mod tests {
     fn loads_and_normalizes_project_local_symbol_filters() {
         let workspace = temporary_workspace("load");
         assert_eq!(ProjectConfig::load(&workspace).unwrap(), Default::default());
+        assert!(ProjectConfig::load(&workspace).unwrap().workspace_only);
         let path = ProjectConfig::create_if_missing(&workspace).unwrap();
         assert_eq!(path, workspace.join(".cgraph.toml"));
         assert_eq!(ProjectConfig::load(&workspace).unwrap(), Default::default());
         fs::write(
             &path,
-            "[filters]\nsymbols = [\"*::into\", \" Option::is_some \", \"*::into\", \"*::Some\"]\n",
+            "[filters]\nworkspace_only = false\nsymbols = [\"*::into\", \" Option::is_some \", \"*::into\", \"*::Some\"]\n",
         )
         .unwrap();
         ProjectConfig::create_if_missing(&workspace).unwrap();
@@ -156,6 +181,7 @@ mod tests {
 
         let config = ProjectConfig::load(&workspace).unwrap();
 
+        assert!(!config.workspace_only);
         assert!(config.symbol_filter.is_ignored("Vec::into"));
         assert!(config.symbol_filter.is_ignored("Option::is_some"));
         assert!(config.symbol_filter.is_ignored("Option::Some"));
