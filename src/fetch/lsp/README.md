@@ -1,5 +1,9 @@
 # LSP 符号命名适配
 
+## 模块边界
+
+LSP 实现按职责拆分为几个窄模块：`profile.rs` 只描述可执行文件到内置 server profile 的映射、默认文件后缀和命令行补全；`symbol_names.rs` 负责不同语言服务器的显示名适配；`normalize.rs` 负责 workspace symbol、document symbol 和 hierarchy item 的协议结果归一化、范围过滤与去重；上层 `lsp.rs` 仅保留 provider 生命周期、查询编排和 JSON-RPC actor。新增 server 特性应优先放入对应边界，避免再次把协议细节堆回 provider。
+
 LSP 对符号名称的标准化程度并不一致。`workspace/symbol` 的 `containerName` 明确表示符号所属容器，但 `CallHierarchyItem.detail` 只是供界面展示的任意文本；clangd、rust-analyzer、Pyrefly 和语言服务器包装器可能返回完全不同的格式。cgraph 因此不能用一个字符串启发式同时解释所有语言。
 
 `SymbolNameAdapter` 是 Fetch 层内部的适配边界。provider 完成 initialize 后，同时参考启动程序的文件名与 `InitializeResult.serverInfo.name` 选择适配器。后者让 `lsp-wrapper rust-analyzer` 一类启动方式仍能选择 Rust 规则。App、State 和 TUI 只接收适配后的显示名，不感知 server 私有格式。

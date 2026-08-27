@@ -4,7 +4,10 @@ use std::ffi::OsStr;
 
 use tower_lsp::lsp_types::SymbolKind;
 
-use super::{ServerProfile, server_profile_from_name, server_profile_from_program};
+use super::profile::{
+    ServerProfile, from_name as server_profile_from_name,
+    from_program as server_profile_from_program,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SymbolNameAdapter {

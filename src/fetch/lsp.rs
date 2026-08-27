@@ -4,6 +4,9 @@
 //! types and server infrastructure, but cgraph needs to act as an LSP client.
 
 mod clangd;
+mod normalize;
+mod profile;
+mod progress;
 mod pyrefly;
 mod symbol_names;
 
@@ -31,15 +34,13 @@ use tower_lsp::lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, CallHierarchyServerCapability, ClientCapabilities, ClientInfo,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbol,
-    DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
-    GeneralClientCapabilities, InitializeParams, InitializeResult, Location, NumberOrString, OneOf,
-    PartialResultParams, Position, PositionEncodingKind, ProgressParams, ProgressParamsValue,
-    Range, ServerInfo, SymbolInformation, SymbolKind, TextDocumentClientCapabilities,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    TypeHierarchyClientCapabilities, TypeHierarchyItem, TypeHierarchyPrepareParams,
-    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Url, WindowClientCapabilities,
-    WorkDoneProgress, WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolClientCapabilities,
+    DocumentSymbolParams, DocumentSymbolResponse, GeneralClientCapabilities, InitializeParams,
+    InitializeResult, OneOf, PartialResultParams, Position, PositionEncodingKind, ServerInfo,
+    SymbolKind, TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TypeHierarchyClientCapabilities, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Url,
+    WindowClientCapabilities, WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
     WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
     request::{
         CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
@@ -52,9 +53,27 @@ use crate::{
     fetch::{FetchSource, HierarchyQuery, HierarchyResponse},
     state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
 };
+use normalize::{
+    DocumentSymbolOwner, call_item_identity, deduplicate_identities, deduplicate_symbols,
+    document_position, find_document_symbol_container, normalize_document_symbols,
+    normalize_symbols, symbol_kind_matches_hierarchy, symbol_leaf_name, type_item_identity,
+    uri_belongs_to_workspace, workspace_symbol_is_visible,
+};
+use profile::{
+    ServerProfile, ensure_pyrefly_subcommand, file_extensions,
+    from_name as server_profile_from_name, from_program as server_profile_from_program,
+};
+use progress::{LspProgressTracker, handle_server_notification};
 use symbol_names::SymbolNameAdapter;
 
+#[cfg(test)]
+use normalize::symbol_belongs_to_workspace;
+
 pub use crate::fetch::WorkspaceSymbolMatch;
+
+pub fn builtin_file_extensions(server_name: &str) -> &'static [&'static str] {
+    file_extensions(server_name)
+}
 
 // A corrupt Content-Length must not turn into an attacker-controlled allocation.
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
@@ -69,33 +88,6 @@ pub struct LspConfig {
     pub workspace_only: bool,
     pub server_name: Option<String>,
     pub file_extensions: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ServerProfile {
-    Standard,
-    RustAnalyzer,
-    Clangd,
-    Pyrefly,
-}
-
-pub(super) fn server_profile_from_name(name: &str) -> ServerProfile {
-    let normalized = Path::new(name)
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or(name)
-        .trim_end_matches(".exe")
-        .to_ascii_lowercase();
-    match normalized.as_str() {
-        "rust-analyzer" | "rust_analyzer" => ServerProfile::RustAnalyzer,
-        "clangd" => ServerProfile::Clangd,
-        "pyrefly" | "pyrefly-lsp" | "pyrefly_lsp" => ServerProfile::Pyrefly,
-        _ => ServerProfile::Standard,
-    }
-}
-
-pub(super) fn server_profile_from_program(program: &OsStr) -> ServerProfile {
-    server_profile_from_name(&Path::new(program).to_string_lossy())
 }
 
 impl LspConfig {
@@ -119,13 +111,11 @@ impl LspConfig {
     pub fn for_server(program: impl Into<OsString>, workspace_root: impl Into<PathBuf>) -> Self {
         let program = program.into();
         let mut config = Self::new(program.clone(), workspace_root);
-        config.file_extensions = builtin_file_extensions(&program.to_string_lossy())
+        config.file_extensions = file_extensions(&program.to_string_lossy())
             .iter()
             .map(|extension| (*extension).to_owned())
             .collect();
-        if server_profile_from_program(&program) == ServerProfile::Pyrefly {
-            config.args.push(OsString::from("lsp"));
-        }
+        ensure_pyrefly_subcommand(&mut config.args, server_profile_from_program(&program));
         config
     }
 
@@ -155,12 +145,8 @@ impl LspConfig {
 
     pub fn server_name(mut self, server_name: impl Into<String>) -> Self {
         let server_name = server_name.into();
-        if server_profile_from_name(&server_name) == ServerProfile::Pyrefly
-            && !self.args.iter().any(|arg| arg == "lsp")
-        {
-            self.args.insert(0, OsString::from("lsp"));
-        }
-        self.file_extensions = builtin_file_extensions(&server_name)
+        ensure_pyrefly_subcommand(&mut self.args, server_profile_from_name(&server_name));
+        self.file_extensions = file_extensions(&server_name)
             .iter()
             .map(|extension| (*extension).to_owned())
             .collect();
@@ -175,15 +161,6 @@ impl LspConfig {
     {
         self.file_extensions = extensions.into_iter().map(Into::into).collect();
         self
-    }
-}
-
-pub fn builtin_file_extensions(server_name: &str) -> &'static [&'static str] {
-    match server_profile_from_name(server_name) {
-        ServerProfile::RustAnalyzer => &["rs"],
-        ServerProfile::Clangd => &["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"],
-        ServerProfile::Pyrefly => &["py", "pyi"],
-        ServerProfile::Standard => &[],
     }
 }
 
@@ -205,20 +182,6 @@ pub enum LspStatusUpdate {
     Warning(String),
     Error(String),
     Disconnected(String),
-}
-
-#[derive(Clone, Debug)]
-struct ActiveProgress {
-    sequence: u64,
-    title: String,
-    message: Option<String>,
-    percentage: Option<u32>,
-}
-
-#[derive(Default)]
-struct LspProgressTracker {
-    next_sequence: u64,
-    active: HashMap<String, ActiveProgress>,
 }
 
 #[derive(Clone)]
@@ -1234,135 +1197,6 @@ where
     .await
 }
 
-fn handle_server_notification(
-    message: &Value,
-    tracker: &mut LspProgressTracker,
-    sender: &mpsc::UnboundedSender<LspStatusUpdate>,
-) {
-    match message.get("method").and_then(Value::as_str) {
-        Some("$/progress") => {
-            let Some(params) = message.get("params").cloned() else {
-                return;
-            };
-            let Ok(params) = serde_json::from_value::<ProgressParams>(params) else {
-                return;
-            };
-            let ProgressParamsValue::WorkDone(progress) = params.value;
-            tracker.update(params.token, progress, sender);
-        }
-        Some("experimental/serverStatus") => {
-            let Some(params) = message.get("params") else {
-                return;
-            };
-            let health = params.get("health").and_then(Value::as_str).unwrap_or("ok");
-            let quiescent = params
-                .get("quiescent")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let message = params
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-
-            let update = match health {
-                "warning" => LspStatusUpdate::Warning(
-                    message.unwrap_or_else(|| "Language server reported a warning".to_owned()),
-                ),
-                "error" => LspStatusUpdate::Error(
-                    message.unwrap_or_else(|| "Language server reported an error".to_owned()),
-                ),
-                _ if quiescent => {
-                    if tracker.emit_latest(sender) {
-                        return;
-                    }
-                    LspStatusUpdate::Ready { message }
-                }
-                _ => {
-                    if tracker.emit_latest(sender) {
-                        return;
-                    }
-                    LspStatusUpdate::Progress {
-                        title: "rust-analyzer".to_owned(),
-                        message: message.or_else(|| Some("Background work in progress".to_owned())),
-                        percentage: None,
-                    }
-                }
-            };
-            let _ = sender.send(update);
-        }
-        _ => {}
-    }
-}
-
-impl LspProgressTracker {
-    fn update(
-        &mut self,
-        token: NumberOrString,
-        progress: WorkDoneProgress,
-        sender: &mpsc::UnboundedSender<LspStatusUpdate>,
-    ) {
-        let token = progress_token_key(token);
-        self.next_sequence = self.next_sequence.wrapping_add(1);
-        match progress {
-            WorkDoneProgress::Begin(progress) => {
-                self.active.insert(
-                    token,
-                    ActiveProgress {
-                        sequence: self.next_sequence,
-                        title: progress.title,
-                        message: progress.message,
-                        percentage: progress.percentage,
-                    },
-                );
-                self.emit_latest(sender);
-            }
-            WorkDoneProgress::Report(progress) => {
-                if let Some(active) = self.active.get_mut(&token) {
-                    active.sequence = self.next_sequence;
-                    if progress.message.is_some() {
-                        active.message = progress.message;
-                    }
-                    if progress.percentage.is_some() {
-                        active.percentage = progress.percentage;
-                    }
-                    self.emit_latest(sender);
-                }
-            }
-            WorkDoneProgress::End(progress) => {
-                self.active.remove(&token);
-                if !self.emit_latest(sender) {
-                    let _ = sender.send(LspStatusUpdate::Ready {
-                        message: progress.message,
-                    });
-                }
-            }
-        }
-    }
-
-    fn emit_latest(&self, sender: &mpsc::UnboundedSender<LspStatusUpdate>) -> bool {
-        let Some(progress) = self
-            .active
-            .values()
-            .max_by_key(|progress| progress.sequence)
-        else {
-            return false;
-        };
-        let _ = sender.send(LspStatusUpdate::Progress {
-            title: progress.title.clone(),
-            message: progress.message.clone(),
-            percentage: progress.percentage,
-        });
-        true
-    }
-}
-
-fn progress_token_key(token: NumberOrString) -> String {
-    match token {
-        NumberOrString::Number(number) => format!("number:{number}"),
-        NumberOrString::String(string) => format!("string:{string}"),
-    }
-}
-
 async fn handle_server_message<W>(
     writer: &mut W,
     message: &Value,
@@ -1495,17 +1329,6 @@ fn requested_configuration(section: Option<&str>) -> Value {
     }
 }
 
-fn symbol_leaf_name(symbol: &str) -> &str {
-    let symbol = symbol
-        .rsplit_once("::")
-        .map(|(_, name)| name)
-        .unwrap_or(symbol);
-    symbol
-        .rsplit_once('.')
-        .map(|(_, name)| name)
-        .unwrap_or(symbol)
-}
-
 fn workspace_name(workspace_root: &Path) -> String {
     workspace_root
         .file_name()
@@ -1567,245 +1390,6 @@ fn merge_json(target: &mut Value, overlay: Value) {
             }
         }
         (target, overlay) => *target = overlay,
-    }
-}
-
-fn symbol_belongs_to_workspace(symbol: &WorkspaceSymbolMatch, workspace_root: &Path) -> bool {
-    uri_belongs_to_workspace(&symbol.uri, workspace_root)
-}
-
-fn workspace_symbol_is_visible(
-    symbol: &WorkspaceSymbolMatch,
-    workspace_root: &Path,
-    workspace_only: bool,
-) -> bool {
-    !workspace_only || symbol_belongs_to_workspace(symbol, workspace_root)
-}
-
-fn uri_belongs_to_workspace(uri: &Url, workspace_root: &Path) -> bool {
-    uri.to_file_path()
-        .is_ok_and(|path| path.starts_with(workspace_root))
-}
-
-fn deduplicate_symbols(
-    symbols: impl IntoIterator<Item = WorkspaceSymbolMatch>,
-) -> Vec<WorkspaceSymbolMatch> {
-    let mut unique = Vec::new();
-    for symbol in symbols {
-        let duplicate = unique.iter().any(|existing: &WorkspaceSymbolMatch| {
-            existing.name == symbol.name
-                && existing.kind == symbol.kind
-                && existing.uri == symbol.uri
-                && existing.range == symbol.range
-                && existing.container_name == symbol.container_name
-        });
-        if !duplicate {
-            unique.push(symbol);
-        }
-    }
-    unique
-}
-
-fn document_position(uri: Url, position: Position) -> (TextDocumentPositionParams, SourceLocation) {
-    let location = SourceLocation {
-        uri: uri.to_string(),
-        line: Some(position.line),
-        character: Some(position.character),
-    };
-    (
-        TextDocumentPositionParams::new(TextDocumentIdentifier::new(uri), position),
-        location,
-    )
-}
-
-fn symbol_kind_matches_hierarchy(kind: HierarchyKind, symbol_kind: SymbolKind) -> bool {
-    match kind {
-        HierarchyKind::Call => matches!(
-            symbol_kind,
-            SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::CONSTRUCTOR
-        ),
-        HierarchyKind::Type => matches!(
-            symbol_kind,
-            SymbolKind::CLASS
-                | SymbolKind::INTERFACE
-                | SymbolKind::STRUCT
-                | SymbolKind::ENUM
-                | SymbolKind::TYPE_PARAMETER
-        ),
-    }
-}
-
-fn call_item_identity(
-    item: CallHierarchyItem,
-    symbol_names: SymbolNameAdapter,
-    document_container: Option<&str>,
-) -> SymbolIdentity {
-    let symbol = symbol_names.call_hierarchy_item(
-        &item.name,
-        item.kind,
-        item.detail.as_deref(),
-        document_container,
-    );
-    SymbolIdentity {
-        symbol,
-        kind: HierarchyKind::Call,
-        location: Some(SourceLocation {
-            uri: item.uri.to_string(),
-            line: Some(item.selection_range.start.line),
-            character: Some(item.selection_range.start.character),
-        }),
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DocumentSymbolOwner {
-    name: String,
-    kind: SymbolKind,
-    range: Range,
-    container_name: Option<String>,
-}
-
-fn normalize_document_symbols(response: DocumentSymbolResponse) -> Vec<DocumentSymbolOwner> {
-    match response {
-        DocumentSymbolResponse::Flat(symbols) => {
-            symbols.into_iter().map(document_symbol_owner).collect()
-        }
-        DocumentSymbolResponse::Nested(symbols) => {
-            let mut normalized = Vec::new();
-            normalize_nested_document_symbols(&symbols, None, &mut normalized);
-            normalized
-        }
-    }
-}
-
-#[allow(deprecated)]
-fn document_symbol_owner(symbol: SymbolInformation) -> DocumentSymbolOwner {
-    DocumentSymbolOwner {
-        name: symbol.name,
-        kind: symbol.kind,
-        range: symbol.location.range,
-        container_name: symbol.container_name,
-    }
-}
-
-fn normalize_nested_document_symbols(
-    symbols: &[DocumentSymbol],
-    container_name: Option<&str>,
-    normalized: &mut Vec<DocumentSymbolOwner>,
-) {
-    for symbol in symbols {
-        normalized.push(DocumentSymbolOwner {
-            name: symbol.name.clone(),
-            kind: symbol.kind,
-            range: symbol.range,
-            container_name: container_name.map(str::to_owned),
-        });
-        if let Some(children) = symbol.children.as_deref() {
-            normalize_nested_document_symbols(children, Some(&symbol.name), normalized);
-        }
-    }
-}
-
-fn find_document_symbol_container<'a>(
-    symbols: &'a [DocumentSymbolOwner],
-    item: &CallHierarchyItem,
-) -> Option<&'a str> {
-    symbols
-        .iter()
-        .filter(|symbol| {
-            symbol.name == item.name
-                && matches!(
-                    symbol.kind,
-                    SymbolKind::FUNCTION | SymbolKind::METHOD | SymbolKind::CONSTRUCTOR
-                )
-                && range_contains_position(symbol.range, item.selection_range.start)
-        })
-        .min_by_key(|symbol| range_span_key(symbol.range))
-        .and_then(|symbol| symbol.container_name.as_deref())
-}
-
-fn range_contains_position(range: Range, position: Position) -> bool {
-    position_after_or_equal(position, range.start) && position_after_or_equal(range.end, position)
-}
-
-fn position_after_or_equal(left: Position, right: Position) -> bool {
-    (left.line, left.character) >= (right.line, right.character)
-}
-
-fn range_span_key(range: Range) -> (u32, u32) {
-    (
-        range.end.line.saturating_sub(range.start.line),
-        range.end.character.saturating_sub(range.start.character),
-    )
-}
-
-fn type_item_identity(item: TypeHierarchyItem) -> SymbolIdentity {
-    SymbolIdentity {
-        symbol: item.name,
-        kind: HierarchyKind::Type,
-        location: Some(SourceLocation {
-            uri: item.uri.to_string(),
-            line: Some(item.selection_range.start.line),
-            character: Some(item.selection_range.start.character),
-        }),
-    }
-}
-
-fn deduplicate_identities(
-    identities: impl IntoIterator<Item = SymbolIdentity>,
-) -> Vec<SymbolIdentity> {
-    let mut unique = Vec::new();
-    for identity in identities {
-        if !unique.contains(&identity) {
-            unique.push(identity);
-        }
-    }
-    unique
-}
-
-fn normalize_symbols(
-    response: WorkspaceSymbolResponse,
-    symbol_names: SymbolNameAdapter,
-) -> Vec<WorkspaceSymbolMatch> {
-    match response {
-        WorkspaceSymbolResponse::Flat(symbols) => symbols
-            .into_iter()
-            .map(|symbol| {
-                let name = symbol_names.workspace_symbol(
-                    &symbol.name,
-                    symbol.kind,
-                    symbol.container_name.as_deref(),
-                );
-                WorkspaceSymbolMatch {
-                    name,
-                    kind: symbol.kind,
-                    container_name: symbol.container_name,
-                    uri: symbol.location.uri,
-                    range: Some(symbol.location.range),
-                }
-            })
-            .collect(),
-        WorkspaceSymbolResponse::Nested(symbols) => symbols
-            .into_iter()
-            .map(|symbol| {
-                let (uri, range) = match symbol.location {
-                    OneOf::Left(Location { uri, range }) => (uri, Some(range)),
-                    OneOf::Right(location) => (location.uri, None),
-                };
-                let name = symbol_names.workspace_symbol(
-                    &symbol.name,
-                    symbol.kind,
-                    symbol.container_name.as_deref(),
-                );
-                WorkspaceSymbolMatch {
-                    name,
-                    kind: symbol.kind,
-                    container_name: symbol.container_name,
-                    uri,
-                    range,
-                }
-            })
-            .collect(),
     }
 }
 
