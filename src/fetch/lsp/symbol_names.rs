@@ -1,8 +1,10 @@
 #![doc = include_str!("README.md")]
 
-use std::{ffi::OsStr, path::Path};
+use std::ffi::OsStr;
 
 use tower_lsp::lsp_types::SymbolKind;
+
+use super::{ServerProfile, server_profile_from_name, server_profile_from_program};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SymbolNameAdapter {
@@ -13,17 +15,13 @@ pub(super) enum SymbolNameAdapter {
 
 impl SymbolNameAdapter {
     pub(super) fn detect(program: &OsStr, server_name: Option<&str>) -> Self {
-        let configured_name = Path::new(program)
-            .file_name()
-            .unwrap_or(program)
-            .to_string_lossy();
-        if server_name.is_some_and(is_rust_analyzer_name) || is_rust_analyzer_name(&configured_name)
+        match server_name
+            .map(server_profile_from_name)
+            .unwrap_or_else(|| server_profile_from_program(program))
         {
-            Self::RustAnalyzer
-        } else if server_name.is_some_and(is_pyrefly_name) || is_pyrefly_name(&configured_name) {
-            Self::Pyrefly
-        } else {
-            Self::Standard
+            ServerProfile::RustAnalyzer => Self::RustAnalyzer,
+            ServerProfile::Pyrefly => Self::Pyrefly,
+            ServerProfile::Clangd | ServerProfile::Standard => Self::Standard,
         }
     }
 
@@ -70,20 +68,6 @@ impl SymbolNameAdapter {
             Self::Pyrefly => pyrefly_hierarchy_callable(name, kind, detail),
         }
     }
-}
-
-fn is_rust_analyzer_name(name: &str) -> bool {
-    matches!(
-        name.trim_end_matches(".exe").to_ascii_lowercase().as_str(),
-        "rust-analyzer" | "rust_analyzer"
-    )
-}
-
-fn is_pyrefly_name(name: &str) -> bool {
-    matches!(
-        name.trim_end_matches(".exe").to_ascii_lowercase().as_str(),
-        "pyrefly" | "pyrefly-lsp" | "pyrefly_lsp"
-    )
 }
 
 fn python_workspace_callable(name: &str, kind: SymbolKind, container: Option<&str>) -> String {

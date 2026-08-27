@@ -13,14 +13,17 @@ pub(super) struct BootstrapDocument {
     pub(super) text: String,
 }
 
-pub(super) fn bootstrap_document(workspace_root: &Path) -> Option<BootstrapDocument> {
-    let path = first_python_source(workspace_root)?;
+pub(super) fn bootstrap_document(
+    workspace_root: &Path,
+    file_extensions: &[String],
+) -> Option<BootstrapDocument> {
+    let path = first_python_source(workspace_root, file_extensions)?;
     let text = fs::read_to_string(&path).ok()?;
     let uri = Url::from_file_path(path).ok()?;
     Some(BootstrapDocument { uri, text })
 }
 
-fn first_python_source(workspace_root: &Path) -> Option<PathBuf> {
+fn first_python_source(workspace_root: &Path, file_extensions: &[String]) -> Option<PathBuf> {
     let mut directories = vec![workspace_root.to_path_buf()];
     let mut scanned_entries = 0;
     while let Some(directory) = directories.pop() {
@@ -43,7 +46,14 @@ fn first_python_source(workspace_root: &Path) -> Option<PathBuf> {
             }
             let path = entry.path();
             if file_type.is_file()
-                && path.extension().and_then(|extension| extension.to_str()) == Some("py")
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        file_extensions
+                            .iter()
+                            .any(|configured| extension.eq_ignore_ascii_case(configured))
+                    })
                 && entry.metadata().ok()?.len() <= MAX_BOOTSTRAP_FILE_SIZE
             {
                 return path.canonicalize().ok();

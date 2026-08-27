@@ -32,7 +32,8 @@ impl TreeSitterLanguage {
         {
             return Some(Self::Rust);
         }
-        if contains_source_with_extension(workspace_root, &["cc", "cpp", "cxx", "hpp"]) {
+        if contains_source_with_extension(workspace_root, &["cc", "cpp", "cxx", "hh", "hpp", "hxx"])
+        {
             return Some(Self::Cpp);
         }
         if workspace_root.join("compile_commands.json").is_file()
@@ -99,7 +100,10 @@ impl TreeSitterLanguage {
         match self {
             Self::Rust => extension == Some("rs"),
             Self::C => matches!(extension, Some("c" | "h")),
-            Self::Cpp => matches!(extension, Some("cc" | "cpp" | "cxx" | "h" | "hpp")),
+            Self::Cpp => matches!(
+                extension,
+                Some("cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx")
+            ),
             Self::Python => extension == Some("py"),
         }
     }

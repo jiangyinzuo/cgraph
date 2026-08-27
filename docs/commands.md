@@ -20,7 +20,7 @@ cgraph [OPTIONS] [COMMAND]
 | 选项 | 作用 |
 | --- | --- |
 | `--workspace <PATH>` | 设置 LSP 工作区，默认是当前目录 |
-| `--lsp <PROGRAM>` | 显式选择语言服务器，覆盖自动检测；Python 默认是 `pyrefly` |
+| `--lsp <PROGRAM>` | 一次性显式选择语言服务器，覆盖项目配置和自动检测；Python 内置默认是 `pyrefly` |
 | `--lsp-arg <ARG>` | 向语言服务器传递一个参数，可重复使用 |
 | `--no-lsp` | 禁止自动启动语言服务器 |
 | `--ipc-socket <PATH>` | 在指定 Unix socket 上启用编辑器双向联动；父目录必须已存在 |
@@ -34,7 +34,7 @@ cgraph --lsp clangd --lsp-arg=--background-index
 cgraph --lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking
 ```
 
-选择 `pyrefly` 时 cgraph 自动添加其必需的 `lsp` 子命令，`--lsp-arg` 只填写 `lsp` 后面的参数。显式 `--lsp pylsp` 仍可覆盖 Python 默认值。
+选择 `pyrefly` 时 cgraph 自动添加其必需的 `lsp` 子命令，`--lsp-arg` 只填写 `lsp` 后面的参数。显式 `--lsp pylsp` 仍可覆盖 Python 默认值。项目级命令和参数推荐写入 `.cgraph.toml` 的 `[lsp]` 段，格式见[项目配置](project-configuration.md)。
 
 全局选项可以放在子命令前后，但团队脚本建议统一放在子命令前，便于阅读。
 

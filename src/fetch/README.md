@@ -10,7 +10,7 @@ rust-analyzer 的进程模型、冷索引原因与未来复用路线单独记录
 
 ## Provider 与 Client Handle
 
-`LspProvider` 拥有语言服务器子进程、连接任务和关闭流程，不能克隆。`LspConfig::for_server` 把已知可执行文件转换为实际 stdio 命令；大多数 server 不加参数，Pyrefly 自动增加 `lsp` 子命令，再追加用户参数。LSP 专用 client 只持有 JSON-RPC actor 的发送端、canonical workspace root 和服务端 hierarchy 能力状态；`TreeSitterProvider` 拥有 grammar/query readiness 和共享的 single-flight 项目索引状态。Fetch 顶层的 `WorkspaceSymbolClient` / `HierarchyClient` 把实现收敛为可克隆的窄接口，TUI 不判断 provider 类型。`HierarchyClient::Hybrid` 可以在同一会话中保留 LSP 主后端与 Tree-sitter 后备，并按单次查询能力选择，而不是把整个会话强制绑定到较弱后端。
+`LspProvider` 拥有语言服务器子进程、连接任务和关闭流程，不能克隆。`LspConfig::for_server` 把可执行文件转换为实际 stdio 命令；`server_name` 可显式选择语言适配 profile，适用于绝对路径或包装脚本。大多数 server 不加参数，Pyrefly profile 自动增加 `lsp` 子命令，再追加用户参数。LSP 专用 client 只持有 JSON-RPC actor 的发送端、canonical workspace root 和服务端 hierarchy 能力状态；`TreeSitterProvider` 拥有 grammar/query readiness 和共享的 single-flight 项目索引状态。Fetch 顶层的 `WorkspaceSymbolClient` / `HierarchyClient` 把实现收敛为可克隆的窄接口，TUI 不判断 provider 类型。`HierarchyClient::Hybrid` 可以在同一会话中保留 LSP 主后端与 Tree-sitter 后备，并按单次查询能力选择，而不是把整个会话强制绑定到较弱后端。
 
 这样设计有两个原因：
 
@@ -19,7 +19,7 @@ rust-analyzer 的进程模型、冷索引原因与未来复用路线单独记录
 
 LSP workspace symbol 与 hierarchy 客户端复用同一个 actor 和语言服务器进程；Tree-sitter 两种客户端复用同一个惰性静态索引，都不会为不同请求类型重复建立后端状态。
 
-LSP actor 的协议边界保持通用：它发送标准 initialize、initialized、workspace/document symbol 和 call/type hierarchy 请求，不把某个 server 的私有索引行为暴露给 App 或 TUI。当前为部分 server 保留的 bootstrap 文档属于临时兼容 profile；未来应从 `.cgraph.toml` 或独立 server 配置加载程序、参数、初始化选项、根标记和可选 bootstrap 策略。新增语言服务器时，优先实现 profile/adaptor，而不是在通用 actor 中增加按程序名分支。
+LSP actor 的协议边界保持通用：它发送标准 initialize、initialized、workspace/document symbol 和 call/type hierarchy 请求，不把某个 server 的私有索引行为暴露给 App 或 TUI。`.cgraph.toml` 的 `[lsp]` 段负责选择 profile 名称、可执行命令、参数和项目文件后缀；内置 profile 为 rust-analyzer、clangd 和 Pyrefly。部分 profile 仍保留受限 bootstrap 文档等兼容逻辑；文件后缀决定 profile 可以选择哪些项目文档，初始化选项和 bootstrap 策略开关尚未开放为通用 TOML 字段。新增语言服务器时，优先实现 profile/adaptor，而不是在通用 actor 中增加按程序名分支。
 
 ## VS Code 式 workspace symbol 查询
 

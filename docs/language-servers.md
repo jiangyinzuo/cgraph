@@ -13,12 +13,24 @@ TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左�
 如果没有传入 `--lsp` 或 `--no-lsp`，cgraph 按以下顺序检查工作区根目录：
 
 1. `Cargo.toml` → `rust-analyzer`
-2. `compile_commands.json`、`CMakeLists.txt` 或根目录 C/C++ 文件 → `clangd`
+2. `compile_commands.json`、`CMakeLists.txt` 或根目录 C/C++ 源文件/头文件 → `clangd`
 3. `pyproject.toml`、`pyrefly.toml`、`setup.py`、`requirements.txt` 或根目录 `.py` 文件 → `pyrefly lsp`
 
 检测是有意保持简单的启动便利功能，不会递归扫描整个仓库，也不会解析编辑器配置。monorepo、多语言仓库或自定义 server 应显式配置。
 
 ## 显式配置
+
+推荐将团队统一使用的 server 写入 workspace 根目录的 `.cgraph.toml`：
+
+```toml
+[lsp]
+name = "clangd"
+command = "clangd"
+args = ["--background-index"]
+file_extensions = ["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]
+```
+
+`name` 选择 server profile/语言方言，`command` 是实际可执行文件（可以是包装脚本或绝对路径），`args` 是按顺序传递的参数数组，不经过 shell。`file_extensions` 是该 profile 的项目文件后缀列表，用于选择触发 server 索引的 bootstrap 文档；写 `hpp` 或 `.hpp` 均可，配置会规范化为小写后缀，但不接受路径和 `*`。省略时，内置 clangd profile 会同时覆盖 C/C++ 源文件与 `h/hh/hpp/hxx` 头文件；Rust 与 Pyrefly 分别使用 `rs` 和 `py/pyi`。省略 `[lsp]` 时，cgraph 使用内置默认 profile：`Cargo.toml` 选择 `rust-analyzer`，C/C++ 标志选择 `clangd`，Python 标志选择 `pyrefly lsp`。项目配置适合提交到版本库；通过 `ec` 修改后，LSP 配置会在下次启动生效。
 
 ```bash
 cgraph --lsp rust-analyzer --workspace /work/project
@@ -28,13 +40,13 @@ cgraph --lsp pyrefly --workspace /work/project
 cgraph --lsp pylsp --workspace /work/project
 ```
 
-`--lsp` 当前接受可执行程序名，不解析一整段 shell 命令。每个参数都要单独写成 `--lsp-arg`，这样可以避免 shell 拼接和转义歧义。Pyrefly 是已知例外：选择可执行文件 `pyrefly` 时，cgraph 自动把 `lsp` 作为第一个参数，用户不应再手工添加；例如可用 `--lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking` 覆盖其索引模式。
+`--lsp` 当前接受可执行程序名，不解析一整段 shell 命令。每个参数都要单独写成 `--lsp-arg`，这样可以避免 shell 拼接和转义歧义；CLI 参数优先于 `.cgraph.toml`。Pyrefly 是已知例外：选择可执行文件 `pyrefly` 时，cgraph 自动把 `lsp` 作为第一个参数，用户不应再手工添加；例如可用 `--lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking` 覆盖其索引模式。
 
-## 标准协议边界与未来配置
+## 标准协议边界与配置边界
 
 cgraph 的 JSON-RPC transport、workspace symbol、document symbol 和 hierarchy 请求遵循标准 LSP，不根据 clangd、rust-analyzer 或其他 server 改写请求语义。语言服务器返回空 workspace symbol 列表时，客户端不能仅凭协议判断“确实没有匹配项”还是“服务端索引尚未完成”；索引进度属于 server 实现和状态通知能力，不是 `workspace/symbol` 的额外协议参数。
 
-当前版本仍保留少量历史兼容逻辑，例如为没有编辑器当前 buffer 的 cgraph 会话向 clangd/Pyrefly 打开一个受限 bootstrap 文档。这些逻辑应视为临时 server profile，而不是通用 LSP 要求。后续将允许项目配置声明 server 的程序、参数、初始化选项、根目录标记和可选 bootstrap 策略；通用 actor 只负责标准 LSP 生命周期，语言专用行为收敛在可替换 profile 中，用户可以自行配置新的语言服务器而无需修改 Fetch 核心。
+当前版本仍保留少量历史兼容逻辑，例如为没有编辑器当前 buffer 的 cgraph 会话向 clangd/Pyrefly 打开一个受限 bootstrap 文档。这些逻辑属于内置 server profile，而不是通用 LSP 要求。项目配置已经可以声明 server 的名称、程序、参数和项目文件后缀；通用 actor 只负责标准 LSP 生命周期，语言专用行为收敛在可替换 profile 中，用户可以自行配置新的语言服务器而无需修改 Fetch 核心。初始化选项和 bootstrap 策略暂未开放为 TOML 字段。
 
 ## 初始化行为
 

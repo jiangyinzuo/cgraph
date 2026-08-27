@@ -7,15 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const PROJECT_CONFIG_FILE: &str = ".cgraph.toml";
-const PROJECT_CONFIG_TEMPLATE: &str = "[filters]\n\
-# Keep discovered symbols inside the project root.\n\
-workspace_only = true\n\
-# Full symbol names; * matches any number of characters.\n\
-symbols = []\n";
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SymbolFilter {
     patterns: Vec<String>,
@@ -77,6 +71,7 @@ fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
 pub struct ProjectConfig {
     pub symbol_filter: SymbolFilter,
     pub workspace_only: bool,
+    pub lsp: Option<LspSettings>,
 }
 
 impl Default for ProjectConfig {
@@ -84,8 +79,98 @@ impl Default for ProjectConfig {
         Self {
             symbol_filter: SymbolFilter::default(),
             workspace_only: true,
+            lsp: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default = "LspSettings::empty", deny_unknown_fields)]
+pub struct LspSettings {
+    #[serde(default = "missing_name", deserialize_with = "deserialize_name")]
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub file_extensions: Option<Vec<String>>,
+}
+
+impl LspSettings {
+    fn empty() -> Self {
+        Self {
+            name: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            file_extensions: None,
+        }
+    }
+
+    fn template() -> Self {
+        Self::default()
+    }
+
+    fn normalize(mut self) -> Result<Self> {
+        self.command = self.command.trim().to_owned();
+        if self.command.is_empty() {
+            bail!("lsp.command must not be empty");
+        }
+        self.name = if self.name == missing_name() {
+            Path::new(&self.command)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&self.command)
+                .trim_end_matches(".exe")
+                .to_owned()
+        } else {
+            self.name.trim().to_owned()
+        };
+        if self.args.iter().any(String::is_empty) {
+            bail!("lsp.args must not contain empty arguments");
+        }
+        self.file_extensions = self
+            .file_extensions
+            .take()
+            .map(normalize_file_extensions)
+            .transpose()?;
+        Ok(self)
+    }
+}
+
+impl Default for LspSettings {
+    fn default() -> Self {
+        Self {
+            name: "rust-analyzer".to_owned(),
+            command: "rust-analyzer".to_owned(),
+            args: Vec::new(),
+            file_extensions: Some(vec!["rs".to_owned()]),
+        }
+    }
+}
+
+fn missing_name() -> String {
+    "__cgraph_missing_name__".to_owned()
+}
+
+fn deserialize_name<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    if name.trim().is_empty() {
+        return Err(serde::de::Error::custom("lsp.name must not be empty"));
+    }
+    Ok(name)
+}
+
+fn project_config_template() -> String {
+    let lsp = toml::to_string(&LspSettings::template())
+        .expect("default LSP settings must serialize to TOML");
+    let commented_lsp = lsp
+        .lines()
+        .map(|line| format!("# {line}\n"))
+        .collect::<String>();
+    format!(
+        "# Optional language-server command.\n# When omitted, cgraph selects rust-analyzer, clangd or pyrefly by project markers.\n#[lsp]\n# name identifies the server profile; command is the executable to run.\n{commented_lsp}[filters]\n# Keep discovered symbols inside the project root.\nworkspace_only = true\n# Full symbol names; * matches any number of characters.\nsymbols = []\n"
+    )
 }
 
 impl ProjectConfig {
@@ -97,7 +182,7 @@ impl ProjectConfig {
         let path = Self::path(workspace_root);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => file
-                .write_all(PROJECT_CONFIG_TEMPLATE.as_bytes())
+                .write_all(project_config_template().as_bytes())
                 .with_context(|| {
                     format!("failed to initialize project config {}", path.display())
                 })?,
@@ -127,6 +212,13 @@ impl ProjectConfig {
             symbol_filter: SymbolFilter::from_patterns(raw.filters.symbols)
                 .with_context(|| format!("{} contains invalid filters.symbols", path.display()))?,
             workspace_only: raw.filters.workspace_only,
+            lsp: raw
+                .lsp
+                .map(LspSettings::normalize)
+                .transpose()
+                .with_context(|| {
+                    format!("{} contains invalid lsp configuration", path.display())
+                })?,
         })
     }
 }
@@ -134,7 +226,31 @@ impl ProjectConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawProjectConfig {
+    lsp: Option<LspSettings>,
     filters: RawFilters,
+}
+
+fn normalize_file_extensions(extensions: Vec<String>) -> Result<Vec<String>> {
+    if extensions.is_empty() {
+        bail!("lsp.file_extensions must contain at least one extension");
+    }
+
+    let mut normalized = Vec::with_capacity(extensions.len());
+    for extension in extensions {
+        let extension = extension.trim().trim_start_matches('.').to_lowercase();
+        if extension.is_empty() {
+            bail!("lsp.file_extensions must not contain empty extensions");
+        }
+        if extension.contains(['/', '\\', '*']) || extension.contains('.') {
+            bail!(
+                "lsp.file_extensions entries must be plain extensions without paths or wildcards"
+            );
+        }
+        if !normalized.contains(&extension) {
+            normalized.push(extension);
+        }
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,7 +277,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{ProjectConfig, SymbolFilter};
+    use super::{LspSettings, ProjectConfig, SymbolFilter};
 
     #[test]
     fn loads_and_normalizes_project_local_symbol_filters() {
@@ -171,9 +287,12 @@ mod tests {
         let path = ProjectConfig::create_if_missing(&workspace).unwrap();
         assert_eq!(path, workspace.join(".cgraph.toml"));
         assert_eq!(ProjectConfig::load(&workspace).unwrap(), Default::default());
+        let template = fs::read_to_string(&path).unwrap();
+        assert!(template.contains("# name = \"rust-analyzer\""));
+        assert!(template.contains("# file_extensions = [\"rs\"]"));
         fs::write(
             &path,
-            "[filters]\nworkspace_only = false\nsymbols = [\"*::into\", \" Option::is_some \", \"*::into\", \"*::Some\"]\n",
+            "[lsp]\nname = \" rust-analyzer \"\ncommand = \" /usr/bin/rust-analyzer \"\nargs = [\"--log-file=/tmp/ra.log\"]\nfile_extensions = [\".RS\", \" rs \", \"RS\"]\n\n[filters]\nworkspace_only = false\nsymbols = [\"*::into\", \" Option::is_some \", \"*::into\", \"*::Some\"]\n",
         )
         .unwrap();
         ProjectConfig::create_if_missing(&workspace).unwrap();
@@ -182,6 +301,22 @@ mod tests {
         let config = ProjectConfig::load(&workspace).unwrap();
 
         assert!(!config.workspace_only);
+        assert_eq!(
+            config.lsp,
+            Some(LspSettings {
+                name: "rust-analyzer".to_owned(),
+                command: "/usr/bin/rust-analyzer".to_owned(),
+                args: vec!["--log-file=/tmp/ra.log".to_owned()],
+                file_extensions: Some(vec!["rs".to_owned()]),
+            })
+        );
+        fs::write(
+            &path,
+            "[lsp]\ncommand = \"/usr/bin/clangd\"\n\n[filters]\nworkspace_only = false\nsymbols = [\"*::into\", \"Option::is_some\", \"*::Some\"]\n",
+        )
+        .unwrap();
+        let config = ProjectConfig::load(&workspace).unwrap();
+        assert_eq!(config.lsp.map(|lsp| lsp.name), Some("clangd".to_owned()));
         assert!(config.symbol_filter.is_ignored("Vec::into"));
         assert!(config.symbol_filter.is_ignored("Option::is_some"));
         assert!(config.symbol_filter.is_ignored("Option::Some"));
@@ -214,6 +349,34 @@ mod tests {
         .unwrap();
         let error = ProjectConfig::load(&workspace).unwrap_err();
         assert!(format!("{error:#}").contains("unknown field"));
+        fs::write(
+            workspace.join(".cgraph.toml"),
+            "[lsp]\nargs = [\"--foo\"]\n",
+        )
+        .unwrap();
+        let error = ProjectConfig::load(&workspace).unwrap_err();
+        assert!(format!("{error:#}").contains("lsp.command must not be empty"));
+        fs::write(
+            workspace.join(".cgraph.toml"),
+            "[lsp]\nname = \"  \"\ncommand = \"clangd\"\n",
+        )
+        .unwrap();
+        let error = ProjectConfig::load(&workspace).unwrap_err();
+        assert!(format!("{error:#}").contains("lsp.name must not be empty"));
+        fs::write(
+            workspace.join(".cgraph.toml"),
+            "[lsp]\ncommand = \"clangd\"\nfile_extensions = []\n",
+        )
+        .unwrap();
+        let error = ProjectConfig::load(&workspace).unwrap_err();
+        assert!(format!("{error:#}").contains("must contain at least one extension"));
+        fs::write(
+            workspace.join(".cgraph.toml"),
+            "[lsp]\ncommand = \"clangd\"\nfile_extensions = [\"src/*.cpp\"]\n",
+        )
+        .unwrap();
+        let error = ProjectConfig::load(&workspace).unwrap_err();
+        assert!(format!("{error:#}").contains("without paths or wildcards"));
         fs::remove_dir_all(workspace).unwrap();
     }
 

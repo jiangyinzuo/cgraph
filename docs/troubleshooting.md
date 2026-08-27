@@ -18,6 +18,15 @@ cgraph --lsp rust-analyzer --workspace /path/to/project
 cgraph --lsp pyrefly --workspace /path/to/project
 ```
 
+也可以在 workspace 根目录的 `.cgraph.toml` 中固定 server；`name` 用于选择方言，`command` 用于启动实际程序：
+
+```toml
+[lsp]
+name = "clangd"
+command = "/usr/bin/clangd"
+args = ["--background-index"]
+```
+
 cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状态栏和搜索框中。当前 server stderr 为了避免破坏 TUI 备用屏幕而被丢弃；更详细的日志输出仍是待实现功能。需要绕过损坏或缺失的 LSP 时，可以使用 `--no-lsp` 强制尝试 Tree-sitter 回退。
 
 ## 搜索一直为空

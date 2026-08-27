@@ -7,7 +7,7 @@ use cgraph::{
     config::ProjectConfig,
     fetch::{
         HierarchyClient, WorkspaceSymbolClient,
-        lsp::{LspConfig, LspProvider},
+        lsp::{LspConfig, LspProvider, builtin_file_extensions},
         treesitter::{TreeSitterLanguage, TreeSitterProvider},
     },
     ipc::IpcServer,
@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     let workspace = cli.workspace.clone();
     let ipc_socket = cli.ipc_socket.clone();
     let project_config = ProjectConfig::load(&workspace)?;
-    let lsp_config = lsp_config(&cli, project_config.workspace_only);
+    let lsp_config = lsp_config(&cli, &project_config);
     let mut app = App::from_cli(cli);
     app.set_symbol_filter(project_config.symbol_filter);
     let mut ipc_server = match ipc_socket {
@@ -147,20 +147,39 @@ fn start_tree_sitter_hierarchy_fallback(workspace: &Path) -> Option<TreeSitterPr
     TreeSitterProvider::start(workspace, language).ok()
 }
 
-fn lsp_config(cli: &Cli, workspace_only: bool) -> Option<LspConfig> {
+fn lsp_config(cli: &Cli, project_config: &ProjectConfig) -> Option<LspConfig> {
     if cli.no_lsp {
         return None;
     }
 
-    let program = cli
-        .lsp
-        .clone()
-        .or_else(|| detect_language_server(&cli.workspace))?;
-    Some(
-        LspConfig::for_server(program, &cli.workspace)
-            .workspace_only(workspace_only)
-            .args(cli.lsp_args.clone()),
-    )
+    let (program, args, name, file_extensions) = if let Some(program) = cli.lsp.clone() {
+        (program, cli.lsp_args.clone(), None, None)
+    } else if let Some(config) = project_config.lsp.as_ref() {
+        (
+            OsString::from(config.command.as_str()),
+            config.args.iter().map(OsString::from).collect(),
+            Some(config.name.clone()),
+            config.file_extensions.clone(),
+        )
+    } else {
+        let program = detect_language_server(&cli.workspace)?;
+        let name = Path::new(&program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        (program, Vec::new(), name, None)
+    };
+    let config = LspConfig::for_server(program, &cli.workspace)
+        .workspace_only(project_config.workspace_only);
+    let config = match name {
+        Some(name) => config.server_name(name),
+        None => config,
+    };
+    let config = match file_extensions {
+        Some(file_extensions) => config.file_extensions(file_extensions),
+        None => config,
+    };
+    Some(config.args(args))
 }
 
 fn detect_language_server(workspace: &Path) -> Option<OsString> {
@@ -171,7 +190,7 @@ fn detect_language_server(workspace: &Path) -> Option<OsString> {
     }
     if workspace.join("compile_commands.json").is_file()
         || workspace.join("CMakeLists.txt").is_file()
-        || contains_source_with_extension(workspace, &["c", "cc", "cpp", "cxx", "h", "hpp"])
+        || contains_source_with_extension(workspace, builtin_file_extensions("clangd"))
     {
         return Some(OsString::from("clangd"));
     }
@@ -194,7 +213,11 @@ fn contains_source_with_extension(workspace: &Path, extensions: &[&str]) -> bool
                 .path()
                 .extension()
                 .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extensions.contains(&extension))
+                .is_some_and(|extension| {
+                    extensions
+                        .iter()
+                        .any(|configured| extension.eq_ignore_ascii_case(configured))
+                })
         })
     })
 }
@@ -209,12 +232,13 @@ mod tests {
     use cgraph::{
         app::{AnalysisBackend, AnalysisPhase, App},
         cli::Cli,
+        config::{LspSettings, ProjectConfig, SymbolFilter},
         fetch::HierarchyQuery,
         state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
     };
     use clap::Parser;
 
-    use super::{lsp_config, start_tree_sitter_fallback};
+    use super::{detect_language_server, lsp_config, start_tree_sitter_fallback};
 
     #[tokio::test]
     async fn initializes_a_queryable_tree_sitter_fallback_and_reports_ready() {
@@ -288,9 +312,10 @@ mod tests {
 
         let detected =
             Cli::try_parse_from(["cgraph", "--workspace", workspace.to_str().unwrap()]).unwrap();
-        let detected = lsp_config(&detected, true).unwrap();
+        let detected = lsp_config(&detected, &ProjectConfig::default()).unwrap();
         assert_eq!(detected.program, "pyrefly");
         assert_eq!(detected.args, ["lsp"].map(std::ffi::OsString::from));
+        assert_eq!(detected.server_name.as_deref(), Some("pyrefly"));
         assert!(detected.workspace_only);
 
         let explicit = Cli::try_parse_from([
@@ -301,9 +326,58 @@ mod tests {
             "pylsp",
         ])
         .unwrap();
-        let explicit = lsp_config(&explicit, true).unwrap();
+        let explicit = lsp_config(&explicit, &ProjectConfig::default()).unwrap();
         assert_eq!(explicit.program, "pylsp");
         assert!(explicit.args.is_empty());
+
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn project_lsp_configuration_overrides_builtin_detection() {
+        let cli = Cli::try_parse_from(["cgraph", "--workspace", "/workspace"]).unwrap();
+        let project_config = ProjectConfig {
+            symbol_filter: SymbolFilter::default(),
+            workspace_only: true,
+            lsp: Some(LspSettings {
+                name: "clangd".to_owned(),
+                command: "custom-lsp".to_owned(),
+                args: vec!["--stdio".to_owned(), "--trace".to_owned()],
+                file_extensions: Some(vec!["cppm".to_owned(), "ixx".to_owned()]),
+            }),
+        };
+
+        let config = lsp_config(&cli, &project_config).unwrap();
+
+        assert_eq!(config.program, "custom-lsp");
+        assert_eq!(
+            config.args,
+            ["--stdio", "--trace"]
+                .map(std::ffi::OsString::from)
+                .to_vec()
+        );
+        assert!(config.workspace_only);
+        assert_eq!(config.file_extensions, ["cppm", "ixx"]);
+    }
+
+    #[test]
+    fn detects_cpp_workspaces_from_header_extensions() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("cgraph-cpp-headers-{unique}"));
+        fs::create_dir(&workspace).unwrap();
+
+        for extension in ["h", "hh", "hpp", "hxx", "HXX"] {
+            let path = workspace.join(format!("worker.{extension}"));
+            fs::write(&path, "struct Worker {};\n").unwrap();
+            assert_eq!(
+                detect_language_server(&workspace),
+                Some(std::ffi::OsString::from("clangd"))
+            );
+            fs::remove_file(path).unwrap();
+        }
 
         fs::remove_dir_all(workspace).unwrap();
     }

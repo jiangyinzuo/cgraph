@@ -67,6 +67,35 @@ pub struct LspConfig {
     pub workspace_root: PathBuf,
     pub initialization_options: Option<Value>,
     pub workspace_only: bool,
+    pub server_name: Option<String>,
+    pub file_extensions: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ServerProfile {
+    Standard,
+    RustAnalyzer,
+    Clangd,
+    Pyrefly,
+}
+
+pub(super) fn server_profile_from_name(name: &str) -> ServerProfile {
+    let normalized = Path::new(name)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(name)
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "rust-analyzer" | "rust_analyzer" => ServerProfile::RustAnalyzer,
+        "clangd" => ServerProfile::Clangd,
+        "pyrefly" | "pyrefly-lsp" | "pyrefly_lsp" => ServerProfile::Pyrefly,
+        _ => ServerProfile::Standard,
+    }
+}
+
+pub(super) fn server_profile_from_program(program: &OsStr) -> ServerProfile {
+    server_profile_from_name(&Path::new(program).to_string_lossy())
 }
 
 impl LspConfig {
@@ -77,6 +106,8 @@ impl LspConfig {
             workspace_root: workspace_root.into(),
             initialization_options: None,
             workspace_only: true,
+            server_name: None,
+            file_extensions: Vec::new(),
         }
     }
 
@@ -88,7 +119,11 @@ impl LspConfig {
     pub fn for_server(program: impl Into<OsString>, workspace_root: impl Into<PathBuf>) -> Self {
         let program = program.into();
         let mut config = Self::new(program.clone(), workspace_root);
-        if is_pyrefly_program(&program) {
+        config.file_extensions = builtin_file_extensions(&program.to_string_lossy())
+            .iter()
+            .map(|extension| (*extension).to_owned())
+            .collect();
+        if server_profile_from_program(&program) == ServerProfile::Pyrefly {
             config.args.push(OsString::from("lsp"));
         }
         config
@@ -116,6 +151,39 @@ impl LspConfig {
     pub fn workspace_only(mut self, workspace_only: bool) -> Self {
         self.workspace_only = workspace_only;
         self
+    }
+
+    pub fn server_name(mut self, server_name: impl Into<String>) -> Self {
+        let server_name = server_name.into();
+        if server_profile_from_name(&server_name) == ServerProfile::Pyrefly
+            && !self.args.iter().any(|arg| arg == "lsp")
+        {
+            self.args.insert(0, OsString::from("lsp"));
+        }
+        self.file_extensions = builtin_file_extensions(&server_name)
+            .iter()
+            .map(|extension| (*extension).to_owned())
+            .collect();
+        self.server_name = Some(server_name);
+        self
+    }
+
+    pub fn file_extensions<I, S>(mut self, extensions: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.file_extensions = extensions.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+pub fn builtin_file_extensions(server_name: &str) -> &'static [&'static str] {
+    match server_profile_from_name(server_name) {
+        ServerProfile::RustAnalyzer => &["rs"],
+        ServerProfile::Clangd => &["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"],
+        ServerProfile::Pyrefly => &["py", "pyi"],
+        ServerProfile::Standard => &[],
     }
 }
 
@@ -626,6 +694,7 @@ impl LspProvider {
         let capabilities = client_capabilities();
         let initialization_options = workspace_symbol_initialization_options(
             &config.program,
+            config.server_name.as_deref(),
             config.initialization_options.clone(),
         );
         let initialize_params = InitializeParams {
@@ -661,15 +730,14 @@ impl LspProvider {
             .await
             .context("failed to notify language server that initialization completed")?;
 
-        let symbol_names = SymbolNameAdapter::detect(
-            &config.program,
-            initialize_result
-                .server_info
-                .as_ref()
-                .map(|info| info.name.as_str()),
-        );
+        let advertised_server_name = initialize_result
+            .server_info
+            .as_ref()
+            .map(|info| info.name.as_str());
+        let detected_server_name = config.server_name.as_deref().or(advertised_server_name);
+        let symbol_names = SymbolNameAdapter::detect(&config.program, detected_server_name);
         let bootstrap_document = if symbol_names.is_pyrefly() {
-            match pyrefly::bootstrap_document(&workspace_root) {
+            match pyrefly::bootstrap_document(&workspace_root, &config.file_extensions) {
                 Some(document) => {
                     client
                         .notify(
@@ -689,13 +757,15 @@ impl LspProvider {
                 }
                 None => None,
             }
-        } else if is_clangd_program(&config.program)
-            || initialize_result
-                .server_info
-                .as_ref()
-                .is_some_and(|info| info.name.eq_ignore_ascii_case("clangd"))
+        } else if server_profile_from_program(&config.program) == ServerProfile::Clangd
+            || config
+                .server_name
+                .as_deref()
+                .is_some_and(|name| server_profile_from_name(name) == ServerProfile::Clangd)
+            || advertised_server_name
+                .is_some_and(|name| server_profile_from_name(name) == ServerProfile::Clangd)
         {
-            match clangd::bootstrap_document(&workspace_root) {
+            match clangd::bootstrap_document(&workspace_root, &config.file_extensions) {
                 Some(document) => {
                     client
                         .notify(
@@ -1425,24 +1495,6 @@ fn requested_configuration(section: Option<&str>) -> Value {
     }
 }
 
-fn is_pyrefly_program(program: &OsStr) -> bool {
-    Path::new(program)
-        .file_name()
-        .unwrap_or(program)
-        .to_string_lossy()
-        .trim_end_matches(".exe")
-        .eq_ignore_ascii_case("pyrefly")
-}
-
-fn is_clangd_program(program: &OsStr) -> bool {
-    Path::new(program)
-        .file_name()
-        .unwrap_or(program)
-        .to_string_lossy()
-        .trim_end_matches(".exe")
-        .eq_ignore_ascii_case("clangd")
-}
-
 fn symbol_leaf_name(symbol: &str) -> &str {
     let symbol = symbol
         .rsplit_once("::")
@@ -1480,9 +1532,13 @@ fn call_hierarchy_supported(initialize_result: &InitializeResult) -> bool {
 
 fn workspace_symbol_initialization_options(
     program: &OsStr,
+    server_name: Option<&str>,
     options: Option<Value>,
 ) -> Option<Value> {
-    if !is_rust_analyzer_program(program) {
+    let profile = server_name
+        .map(server_profile_from_name)
+        .unwrap_or_else(|| server_profile_from_program(program));
+    if profile != ServerProfile::RustAnalyzer {
         return options;
     }
 
@@ -1501,15 +1557,6 @@ fn workspace_symbol_initialization_options(
         }),
     );
     Some(options)
-}
-
-fn is_rust_analyzer_program(program: &OsStr) -> bool {
-    let program_name = Path::new(program)
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default();
-    program_name.eq_ignore_ascii_case("rust-analyzer")
-        || program_name.eq_ignore_ascii_case("rust-analyzer.exe")
 }
 
 fn merge_json(target: &mut Value, overlay: Value) {
@@ -1901,6 +1948,7 @@ mod tests {
 
         let options = workspace_symbol_initialization_options(
             OsStr::new("rust-analyzer"),
+            None,
             Some(json!({ "cargo": { "features": "all" } })),
         )
         .unwrap();
@@ -1922,14 +1970,33 @@ mod tests {
         assert_eq!(
             workspace_symbol_initialization_options(
                 OsStr::new("clangd"),
+                None,
                 Some(json!({ "clangd": true })),
             ),
             Some(json!({ "clangd": true }))
         );
+        let wrapper = LspConfig::for_server("/opt/tools/lsp-wrapper", "/workspace")
+            .server_name("rust-analyzer");
+        assert_eq!(
+            workspace_symbol_initialization_options(
+                &wrapper.program,
+                wrapper.server_name.as_deref(),
+                None,
+            )
+            .unwrap()["workspace"]["symbol"]["search"]["kind"],
+            "all_symbols"
+        );
+        let pyrefly_wrapper =
+            LspConfig::for_server("/opt/tools/lsp-wrapper", "/workspace").server_name("pyrefly");
+        assert_eq!(pyrefly_wrapper.args, ["lsp"].map(std::ffi::OsString::from));
         assert!(
             !LspConfig::for_server("clangd", "/workspace")
                 .workspace_only(false)
                 .workspace_only
+        );
+        assert_eq!(
+            LspConfig::for_server("/usr/bin/clangd", "/workspace").file_extensions,
+            ["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]
         );
     }
 
@@ -2514,7 +2581,7 @@ mod tests {
         fs::write(workspace.join("pyrefly.toml"), "").unwrap();
         fs::write(
             workspace.join("main.py"),
-            "class Worker:\n    def run(self) -> None:\n        helper()\n\n\ndef helper() -> None:\n    pass\n\n\ndef main() -> None:\n    Worker().run()\n",
+            "class Base:\n    pass\n\n\nclass Worker(Base):\n    def run(self) -> None:\n        helper()\n\n\ndef helper() -> None:\n    pass\n\n\ndef main() -> None:\n    Worker().run()\n",
         )
         .unwrap();
 
@@ -2561,6 +2628,37 @@ mod tests {
                 .any(|child| child.symbol == "Worker.run")
         );
 
+        let tree_sitter = TreeSitterProvider::start(&workspace, TreeSitterLanguage::Python)
+            .expect("Python Tree-sitter fallback failed to initialize");
+        let worker = tree_sitter
+            .workspace_symbol_client()
+            .query("Worker")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|symbol| symbol.name == "Worker")
+            .expect("Tree-sitter did not index Worker");
+        let worker_position = worker.range.expect("Worker has no source range").start;
+        let types = FetchHierarchyClient::with_fallback(
+            lsp.hierarchy_client(),
+            tree_sitter.hierarchy_client(),
+        )
+        .query(HierarchyQuery {
+            symbol: SymbolIdentity {
+                symbol: worker.name,
+                kind: HierarchyKind::Type,
+                location: Some(SourceLocation {
+                    uri: worker.uri.to_string(),
+                    line: Some(worker_position.line),
+                    character: Some(worker_position.character),
+                }),
+            },
+            direction: HierarchyDirection::Incoming,
+        })
+        .await
+        .expect("Pyrefly type hierarchy or Tree-sitter fallback failed");
+        assert!(types.children.iter().any(|child| child.symbol == "Base"));
+
         lsp.shutdown().await.unwrap();
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -2581,7 +2679,7 @@ mod tests {
         .unwrap();
         fs::write(
             workspace.join("src/main.rs"),
-            "fn helper() {}\n\nfn main() {\n    helper();\n}\n",
+            "trait Command {}\nstruct Cli;\nimpl Command for Cli {}\n\nfn helper() {}\n\nfn main() {\n    helper();\n}\n",
         )
         .unwrap();
 
@@ -2630,6 +2728,37 @@ mod tests {
                 .any(|child| child.symbol == "helper")
         );
 
+        let tree_sitter = TreeSitterProvider::start(&workspace, TreeSitterLanguage::Rust)
+            .expect("Rust Tree-sitter fallback failed to initialize");
+        let cli = tree_sitter
+            .workspace_symbol_client()
+            .query("Cli")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|symbol| symbol.name == "Cli")
+            .expect("Tree-sitter did not index Cli");
+        let cli_position = cli.range.expect("Cli has no source range").start;
+        let types = FetchHierarchyClient::with_fallback(
+            lsp.hierarchy_client(),
+            tree_sitter.hierarchy_client(),
+        )
+        .query(HierarchyQuery {
+            symbol: SymbolIdentity {
+                symbol: cli.name,
+                kind: HierarchyKind::Type,
+                location: Some(SourceLocation {
+                    uri: cli.uri.to_string(),
+                    line: Some(cli_position.line),
+                    character: Some(cli_position.character),
+                }),
+            },
+            direction: HierarchyDirection::Incoming,
+        })
+        .await
+        .expect("rust-analyzer type hierarchy or Tree-sitter fallback failed");
+        assert!(types.children.iter().any(|child| child.symbol == "Command"));
+
         lsp.shutdown().await.unwrap();
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -2643,7 +2772,9 @@ mod tests {
 
         let workspace = external_server_workspace("clangd");
         let source = workspace.join("src/main.cpp");
+        let header = workspace.join("include/worker.hpp");
         fs::create_dir(workspace.join("src")).unwrap();
+        fs::create_dir(workspace.join("include")).unwrap();
         fs::write(
             workspace.join("compile_commands.json"),
             serde_json::to_vec(&vec![json!({
@@ -2653,6 +2784,7 @@ mod tests {
                     "clang++",
                     "-std=c++17",
                     "-Wall",
+                    "-Iinclude",
                     "-c",
                     source,
                 ],
@@ -2662,7 +2794,12 @@ mod tests {
         .unwrap();
         fs::write(
             &source,
-            "namespace demo {\nclass Worker { public: void run(); };\nvoid Worker::run() {}\n}\n\nvoid helper() {}\nint main() { helper(); return 0; }\n",
+            "#include \"worker.hpp\"\n\nvoid helper() {}\nint main() { demo::Worker worker; worker.run(); helper(); return 0; }\n",
+        )
+        .unwrap();
+        fs::write(
+            &header,
+            "#pragma once\nnamespace demo {\nvoid helper() {}\nclass Base {};\nclass Worker : public Base { public: void run() { helper(); } };\n}\n",
         )
         .unwrap();
 
@@ -2677,8 +2814,58 @@ mod tests {
         let method = wait_for_workspace_symbol_leaf(&lsp, "run").await;
         assert_eq!(method.name, "demo::Worker::run");
         assert_eq!(method.kind, SymbolKind::METHOD);
-        assert_eq!(method.uri, Url::from_file_path(&source).unwrap());
+        assert_eq!(method.uri, Url::from_file_path(&header).unwrap());
         assert!(method.range.is_some());
+
+        let method_position = method.range.unwrap().start;
+        let calls = lsp
+            .hierarchy_client()
+            .query(HierarchyQuery {
+                symbol: SymbolIdentity {
+                    symbol: method.name.clone(),
+                    kind: HierarchyKind::Call,
+                    location: Some(SourceLocation {
+                        uri: method.uri.to_string(),
+                        line: Some(method_position.line),
+                        character: Some(method_position.character),
+                    }),
+                },
+                direction: HierarchyDirection::Outgoing,
+            })
+            .await
+            .expect("clangd call hierarchy failed");
+        assert!(calls.children.iter().any(|child| child.symbol == "helper"));
+
+        let tree_sitter = TreeSitterProvider::start(&workspace, TreeSitterLanguage::Cpp)
+            .expect("C++ Tree-sitter fallback failed to initialize");
+        let worker = tree_sitter
+            .workspace_symbol_client()
+            .query("Worker")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|symbol| symbol.name == "Worker")
+            .expect("Tree-sitter did not index Worker");
+        let worker_position = worker.range.expect("Worker has no source range").start;
+        let types = FetchHierarchyClient::with_fallback(
+            lsp.hierarchy_client(),
+            tree_sitter.hierarchy_client(),
+        )
+        .query(HierarchyQuery {
+            symbol: SymbolIdentity {
+                symbol: worker.name,
+                kind: HierarchyKind::Type,
+                location: Some(SourceLocation {
+                    uri: worker.uri.to_string(),
+                    line: Some(worker_position.line),
+                    character: Some(worker_position.character),
+                }),
+            },
+            direction: HierarchyDirection::Incoming,
+        })
+        .await
+        .expect("clangd type hierarchy or Tree-sitter fallback failed");
+        assert!(types.children.iter().any(|child| child.symbol == "Base"));
 
         let main = wait_for_workspace_symbol(&lsp, "main").await;
         assert_eq!(main.name, "main");
@@ -2687,6 +2874,171 @@ mod tests {
 
         lsp.shutdown().await.unwrap();
         fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn integrates_with_clangd_external_compilation_database_and_project_config() {
+        if !external_server_available("clangd").await {
+            eprintln!("skipping real clangd integration test: clangd is not in PATH");
+            return;
+        }
+
+        let fixture_root = external_server_workspace("clangd-external-build");
+        let workspace = fixture_root.join("cpp-project");
+        let build_directory = fixture_root.join("tmp-build");
+        let include_directory = workspace.join("include");
+        let source_directory = workspace.join("src");
+        fs::create_dir_all(&include_directory).unwrap();
+        fs::create_dir_all(&source_directory).unwrap();
+        fs::create_dir_all(&build_directory).unwrap();
+
+        let main_source = source_directory.join("main.cpp");
+        let worker_source = source_directory.join("a_worker.cpp");
+        let helper_source = source_directory.join("z_helper.cpp");
+        let base_header = include_directory.join("base.hpp");
+        let worker_header = include_directory.join("worker.hpp");
+        let helper_header = include_directory.join("helper.hpp");
+
+        fs::write(
+            workspace.join(".clangd"),
+            "CompileFlags:\n  CompilationDatabase: ../tmp-build\n",
+        )
+        .unwrap();
+        fs::write(
+            &base_header,
+            "#pragma once\nnamespace demo {\nclass Base { public: virtual ~Base() = default; virtual void run() = 0; };\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            &worker_header,
+            "#pragma once\n#include \"base.hpp\"\nnamespace demo {\nclass Worker final : public Base { public: void run() override; };\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            &helper_header,
+            "#pragma once\nnamespace demo { void helper(); }\n",
+        )
+        .unwrap();
+        fs::write(
+            &helper_source,
+            "#include \"helper.hpp\"\nnamespace demo { void helper() {} }\n",
+        )
+        .unwrap();
+        fs::write(
+            &worker_source,
+            "#include \"worker.hpp\"\n#include \"helper.hpp\"\nnamespace demo { void Worker::run() { helper(); } }\n",
+        )
+        .unwrap();
+        fs::write(
+            &main_source,
+            "#include \"worker.hpp\"\nint main() { demo::Worker worker; worker.run(); return 0; }\n",
+        )
+        .unwrap();
+
+        let compilation_database = [&main_source, &worker_source, &helper_source]
+            .into_iter()
+            .map(|source| {
+                json!({
+                    "directory": workspace,
+                    "file": source,
+                    "arguments": [
+                        "clang++",
+                        "-std=c++17",
+                        format!("-I{}", include_directory.display()),
+                        "-c",
+                        source,
+                    ],
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            build_directory.join("compile_commands.json"),
+            serde_json::to_vec(&compilation_database).unwrap(),
+        )
+        .unwrap();
+
+        let lsp = timeout(
+            Duration::from_secs(60),
+            LspProvider::start(
+                LspConfig::for_server("clangd", &workspace).file_extensions(["cpp"]),
+            ),
+        )
+        .await
+        .expect("clangd initialization with external compilation database timed out")
+        .unwrap();
+
+        let main = wait_for_workspace_symbol_in_file(&lsp, "main", &main_source).await;
+        assert_eq!(main.kind, SymbolKind::FUNCTION);
+        let helper = wait_for_workspace_symbol_in_file(&lsp, "helper", &helper_source).await;
+        assert_eq!(helper.name, "helper");
+        assert_eq!(helper.kind, SymbolKind::FUNCTION);
+        let method = wait_for_workspace_symbol_in_file(&lsp, "run", &worker_source).await;
+        assert_eq!(method.name, "demo::Worker::run");
+        assert_eq!(method.kind, SymbolKind::METHOD);
+
+        let method_position = method.range.expect("Worker::run has no source range").start;
+        let outgoing = lsp
+            .hierarchy_client()
+            .query(HierarchyQuery {
+                symbol: SymbolIdentity {
+                    symbol: method.name.clone(),
+                    kind: HierarchyKind::Call,
+                    location: Some(SourceLocation {
+                        uri: method.uri.to_string(),
+                        line: Some(method_position.line),
+                        character: Some(method_position.character),
+                    }),
+                },
+                direction: HierarchyDirection::Outgoing,
+            })
+            .await
+            .expect("clangd cross-file outgoing call hierarchy failed");
+        assert!(
+            outgoing
+                .children
+                .iter()
+                .any(|child| symbol_leaf_name(&child.symbol) == "helper")
+        );
+
+        let tree_sitter = TreeSitterProvider::start(&workspace, TreeSitterLanguage::Cpp)
+            .expect("C++ Tree-sitter fallback failed to initialize");
+        let worker = tree_sitter
+            .workspace_symbol_client()
+            .query("Worker")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|symbol| symbol.name == "Worker")
+            .expect("Tree-sitter did not index Worker from worker.hpp");
+        assert_eq!(worker.uri, Url::from_file_path(&worker_header).unwrap());
+        let worker_position = worker.range.expect("Worker has no source range").start;
+        let supertypes = FetchHierarchyClient::with_fallback(
+            lsp.hierarchy_client(),
+            tree_sitter.hierarchy_client(),
+        )
+        .query(HierarchyQuery {
+            symbol: SymbolIdentity {
+                symbol: worker.name,
+                kind: HierarchyKind::Type,
+                location: Some(SourceLocation {
+                    uri: worker.uri.to_string(),
+                    line: Some(worker_position.line),
+                    character: Some(worker_position.character),
+                }),
+            },
+            direction: HierarchyDirection::Incoming,
+        })
+        .await
+        .expect("clangd type hierarchy or Tree-sitter fallback failed");
+        assert!(
+            supertypes
+                .children
+                .iter()
+                .any(|child| child.symbol == "Base")
+        );
+
+        lsp.shutdown().await.unwrap();
+        fs::remove_dir_all(fixture_root).unwrap();
     }
 
     #[tokio::test]
@@ -2767,6 +3119,38 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("{expected_name:?} did not appear in workspace symbols"))
+    }
+
+    async fn wait_for_workspace_symbol_in_file(
+        lsp: &LspProvider,
+        expected_leaf: &str,
+        expected_path: &Path,
+    ) -> WorkspaceSymbolMatch {
+        let expected_uri = Url::from_file_path(expected_path).unwrap();
+        timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(symbol) = lsp
+                    .workspace_symbols(expected_leaf)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find(|symbol| {
+                        symbol_leaf_name(&symbol.name) == expected_leaf
+                            && symbol.uri == expected_uri
+                    })
+                {
+                    return symbol;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{expected_leaf:?} in {} did not appear in workspace symbols",
+                expected_path.display()
+            )
+        })
     }
 
     fn symbol(uri: &str) -> WorkspaceSymbolMatch {

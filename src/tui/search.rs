@@ -246,14 +246,26 @@ pub(super) fn symbol_matches_search(search_kind: SearchKind, symbol_kind: Symbol
 }
 
 fn modal_area(screen: Rect) -> Rect {
-    let width = screen.width.saturating_sub(2).min(100);
-    let height = screen.height.saturating_sub(2).min(16);
+    let width = proportional_dimension(screen.width, 4, 5);
+    let height = proportional_dimension(screen.height, 7, 10);
     Rect::new(
         screen.x + screen.width.saturating_sub(width) / 2,
-        screen.y + u16::from(screen.height > height),
+        screen.y + screen.height.saturating_sub(height) / 2,
         width,
         height,
     )
+}
+
+fn proportional_dimension(total: u16, numerator: u16, denominator: u16) -> u16 {
+    if total == 0 {
+        return 0;
+    }
+    total
+        .saturating_mul(numerator)
+        .checked_div(denominator)
+        .unwrap_or(total)
+        .max(1)
+        .min(total)
 }
 
 fn layout(screen: Rect) -> (Rect, Rect, Rect) {
@@ -270,7 +282,9 @@ fn layout(screen: Rect) -> (Rect, Rect, Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::container_label;
+    use ratatui::layout::Rect;
+
+    use super::{container_label, modal_area};
     use crate::app::SearchItem;
 
     #[test]
@@ -288,5 +302,19 @@ mod tests {
 
         item.name = "run".to_owned();
         assert_eq!(container_label(&item), Some("Worker"));
+    }
+
+    #[test]
+    fn workspace_symbol_modal_uses_most_of_the_screen_without_overflowing() {
+        let area = modal_area(Rect::new(0, 0, 120, 40));
+        assert_eq!(area, Rect::new(12, 6, 96, 28));
+
+        let small = modal_area(Rect::new(3, 4, 7, 5));
+        assert!(small.x >= 3);
+        assert!(small.y >= 4);
+        assert!(small.right() <= 10);
+        assert!(small.bottom() <= 9);
+        assert!(small.width > 0);
+        assert!(small.height > 0);
     }
 }

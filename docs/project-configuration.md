@@ -1,6 +1,20 @@
 # 项目配置
 
-cgraph 会读取 `--workspace` 根目录中的 `.cgraph.toml`。该文件适合提交到项目版本库，使团队成员看到一致的关系图；没有这个文件时仍默认只展示项目内符号，符号名过滤规则保持为空。
+cgraph 会读取 `--workspace` 根目录中的 `.cgraph.toml`。该文件适合提交到项目版本库，使团队成员看到一致的关系图；没有这个文件时仍使用内置 LSP 自动检测和项目范围过滤，符号名过滤规则保持为空。
+
+## 语言服务器
+
+可以在项目配置中直接指定 stdio LSP 命令和参数：
+
+```toml
+[lsp]
+name = "clangd"
+command = "clangd"
+args = ["--background-index"]
+file_extensions = ["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]
+```
+
+`name` 指定内置 server profile/语言方言，`command` 表示实际可执行文件或路径；例如包装脚本可以使用 `name = "clangd"`。`args` 中每个元素作为一个独立参数传递，不进行 shell 解析。`file_extensions` 控制 profile 查找可用于启动索引的项目文档；每项只写不带路径和通配符的后缀。加载时会去掉可选前导 `.`、转成小写并去重。省略该字段时使用 profile 默认值：Rust 为 `rs`，clangd 为 `c/cc/cpp/cxx/h/hh/hpp/hxx`，Pyrefly 为 `py/pyi`；显式空数组是配置错误。自定义语言服务器应显式声明自己的后缀。省略 `[lsp]` 时，cgraph 使用内置默认 profile：Rust 为 `rust-analyzer`，C/C++ 为 `clangd`，Python 为 `pyrefly lsp`。CLI 的 `--lsp` 与 `--lsp-arg` 是一次性覆盖，优先于项目配置；`--no-lsp` 会完全禁用 LSP。通过 `ec` 修改命令后，过滤配置会在当前会话刷新，但新的 LSP 命令、参数和文件扩展名在下一次启动时生效。
 
 ## 过滤符号
 
@@ -41,6 +55,14 @@ workspace_only = false
 Canvas 模式输入 `ec` 会离开备用屏幕，并用 `$EDITER` 打开当前 workspace 的 `.cgraph.toml`。项目没有配置文件时，cgraph 先用 `create_new` 创建以下最小有效模板，不覆盖已经存在的文件：
 
 ```toml
+# Optional language-server command.
+# When omitted, cgraph selects rust-analyzer, clangd or pyrefly by project markers.
+#[lsp]
+# name = "rust-analyzer"
+# command = "rust-analyzer"
+# args = []
+# file_extensions = ["rs"]
+
 [filters]
 # Keep discovered symbols inside the project root.
 workspace_only = true

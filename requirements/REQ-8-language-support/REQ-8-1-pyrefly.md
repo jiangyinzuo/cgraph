@@ -16,6 +16,7 @@ Python 工作区无需额外参数即可使用 Pyrefly 的 workspace symbol、ca
 - 浅层检测到 `pyproject.toml`、`pyrefly.toml`、`setup.py`、`requirements.txt` 或根目录 `.py` 文件时，默认语言服务器为 Pyrefly。
 - 自动检测或显式 `--lsp pyrefly` 都必须启动 `pyrefly lsp`；重复的 `--lsp-arg` 追加在 `lsp` 子命令之后。
 - 用户可以用 `--lsp pylsp` 或其他 stdio LSP 程序显式覆盖默认值。
+- Python 项目也可以在 `.cgraph.toml` 的 `[lsp]` 段配置 `command` 和 `args`；该项目配置优先于自动检测，但低于一次性的 CLI 覆盖。
 - 仅在 server capability 声明支持时使用标准 workspace symbol、call hierarchy 和 type hierarchy，不实现 Pyrefly 私有 hierarchy 协议。
 - Pyrefly call hierarchy 的模块限定 `detail` 只在已识别的 Python adapter 中解释；方法显示为 `Class.method`，不把模块路径或任意 detail 当成类名。
 - 没有精确位置的 Python CLI 根同时接受 `Class.method` 和通用 `Class::method` 输入，并用末级方法名解析 workspace symbol。

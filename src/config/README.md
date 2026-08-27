@@ -4,13 +4,35 @@
 
 `config` 模块只负责定位 workspace 根目录的 `.cgraph.toml`、安全创建最小模板、校验 schema，并生成 UI 与 provider 无关的配置值。启动和 `ec` 返回后都走同一个严格 loader；本模块不监控文件变化、不启动编辑器，也不直接刷新图。
 
+`LspSettings` 是 `[lsp]` 段唯一的 Rust 配置模型，同时派生 TOML 的序列化和反序列化。它在加载后执行 command/name/extension 规范化；缺省模板通过同一个结构体序列化生成，避免模板字段与 loader schema 分叉。显式空 `name` 仍会报错；只有省略 `name` 时才从 command basename 推导。
+
 ## 当前 schema
 
 ```toml
+[lsp]
+# command and args are passed directly; no shell parsing is performed.
+# name = "rust-analyzer"
+# command = "rust-analyzer"
+# args = []
+# file_extensions = ["rs"]
+
 [filters]
 workspace_only = true
 symbols = ["*::into", "Option::is_some", "*::Some"]
 ```
+
+`[lsp]` 是可选的项目语言服务器配置。`name` 选择 server profile/语言方言；`command` 是实际可执行文件或路径，`args` 是按原样传递给它的参数列表；不能把整段 shell 命令写进一个字段。`file_extensions` 是 profile 可用于 bootstrap 扫描的项目文件后缀；加载器去掉可选前导点、统一为小写并去重，空数组、空后缀、路径和通配符会报错。省略时由 profile 补默认值：Rust 为 `rs`，clangd 为 `c/cc/cpp/cxx/h/hh/hpp/hxx`，Pyrefly 为 `py/pyi`。`name` 省略时从 command 的 basename 推导，适合 `/usr/bin/clangd` 这类路径；使用包装脚本时应显式填写真实 server name。省略 `[lsp]` 时，主程序按项目标志选择内置 profile：Rust 使用 `rust-analyzer`，C/C++ 使用 `clangd`，Python 使用 `pyrefly lsp`。CLI 的 `--lsp` / `--lsp-arg` 仍可作为一次性显式覆盖，优先级高于项目文件；`--no-lsp` 优先级最高。
+
+配置命令的示例：
+
+```toml
+[lsp]
+command = "clangd"
+args = ["--background-index"]
+file_extensions = ["c", "cpp", "h", "hpp"]
+```
+
+Pyrefly 仍只需填写 `command = "pyrefly"`，cgraph 会自动在参数最前面加入其标准 `lsp` 子命令；其他 server 不会被添加私有参数。配置文件通过 `ec` 修改后，过滤规则和项目范围会在当前会话刷新；LSP 可执行文件、参数或文件后缀的修改将在下一次启动 cgraph 时生效，避免在 TUI 中无序替换正在服务的 JSON-RPC 进程。
 
 `filters.workspace_only` 控制 LSP workspace symbol 和 hierarchy 是否只保留位于当前项目根目录下的文件。默认值为 `true`；设为 `false` 后，客户端会保留语言服务器返回的项目外 URI。项目外节点是否能继续展开仍取决于语言服务器是否要求客户端先 `didOpen` 对应文档，例如 clangd 的系统头文件可能返回 `trying to get AST for non-added document`。
 
