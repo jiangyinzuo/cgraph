@@ -20,7 +20,7 @@ pub(super) struct EditorOutcome {
 
 pub(super) struct ConfigReload {
     pub requests: Vec<HierarchyLoadRequest>,
-    pub workspace_only: bool,
+    pub filters: crate::config::FilterConfig,
 }
 
 pub(super) fn open(workspace: &Path) -> Result<EditorOutcome> {
@@ -61,12 +61,9 @@ pub(super) fn edit_project_config(
             return Ok(None);
         }
     };
-    let workspace_only = config.workspace_only;
-    let requests = app.reload_symbol_filter(config.symbol_filter, hierarchy_available);
-    Ok(Some(ConfigReload {
-        requests,
-        workspace_only,
-    }))
+    let filters = config.filters.clone();
+    let requests = app.reload_filter_config(filters.clone(), hierarchy_available);
+    Ok(Some(ConfigReload { requests, filters }))
 }
 
 fn open_with_editor(editor: &OsStr, workspace: &Path) -> Result<EditorOutcome> {
@@ -138,7 +135,7 @@ mod tests {
         assert!(
             fs::read_to_string(&outcome.path)
                 .unwrap()
-                .contains("symbols = []")
+                .contains("rules = []")
         );
         fs::remove_dir_all(workspace).unwrap();
     }

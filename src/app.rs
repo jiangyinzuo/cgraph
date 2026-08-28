@@ -5,7 +5,7 @@
 
 use crate::{
     cli::{Cli, Command},
-    config::SymbolFilter,
+    config::{FilterConfig, PathFilter, SymbolFilter},
     fetch::{CachePolicy, FetchSource, HierarchyQuery, HierarchyResponse},
     state::{
         HierarchyDirection, HierarchyKind, NodeId, SourceLocation, SymbolIdentity, Viewport,
@@ -14,6 +14,7 @@ use crate::{
 };
 
 use std::path::PathBuf;
+use tower_lsp::lsp_types::Url;
 
 mod config;
 mod help;
@@ -158,6 +159,8 @@ pub struct App {
     pub canvas_notice: Option<String>,
     canvas_notice_is_error: bool,
     symbol_filter: SymbolFilter,
+    filters: FilterConfig,
+    path_filter: PathFilter,
     analysis_error: Option<String>,
     next_search_request_id: u64,
     next_hierarchy_request_id: u64,
@@ -194,6 +197,10 @@ impl App {
             canvas_notice: None,
             canvas_notice_is_error: false,
             symbol_filter: SymbolFilter::default(),
+            filters: FilterConfig::from_rules(std::iter::empty::<&str>(), false)
+                .expect("empty filter config is valid"),
+            path_filter: PathFilter::from_patterns(std::iter::empty::<&str>(), false)
+                .expect("empty path filter is valid"),
             analysis_error: None,
             next_search_request_id: 1,
             next_hierarchy_request_id: 1,
@@ -332,9 +339,19 @@ impl App {
         match result {
             Ok(candidates) => {
                 let symbol_filter = &self.symbol_filter;
+                let filters = &self.filters;
+                let workspace = &self.workspace;
                 search.candidates = candidates
                     .into_iter()
-                    .filter(|candidate| !symbol_filter.is_ignored(&candidate.name))
+                    .filter(|candidate| {
+                        !symbol_filter.is_ignored(&candidate.name)
+                            && candidate_is_visible(
+                                &candidate.name,
+                                candidate.source.as_ref(),
+                                filters,
+                                workspace,
+                            )
+                    })
                     .collect();
                 search.status = SearchStatus::Ready;
                 refresh_search_items(search);
@@ -600,7 +617,15 @@ impl App {
                 let children = response
                     .children
                     .into_iter()
-                    .filter(|child| !self.symbol_filter.is_ignored(&child.symbol))
+                    .filter(|child| {
+                        !self.symbol_filter.is_ignored(&child.symbol)
+                            && candidate_is_visible(
+                                &child.symbol,
+                                child.location.as_ref(),
+                                &self.filters,
+                                &self.workspace,
+                            )
+                    })
                     .collect();
                 self.graph
                     .replace_branch_neighbors(node_id, request.query.direction, children);
@@ -702,6 +727,23 @@ impl App {
             query: search.input.clone(),
         })
     }
+}
+
+fn candidate_is_visible(
+    symbol: &str,
+    location: Option<&SourceLocation>,
+    filters: &FilterConfig,
+    workspace: &std::path::Path,
+) -> bool {
+    let Some(location) = location else {
+        return !filters.is_ignored(Some(symbol), None, workspace);
+    };
+    let Ok(uri) = Url::parse(&location.uri) else {
+        return true;
+    };
+    uri.to_file_path()
+        .map(|path| filters.is_visible_symbol_path(symbol, &path, workspace))
+        .unwrap_or(!filters.workspace_only())
 }
 
 #[cfg(test)]

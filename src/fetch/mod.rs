@@ -12,6 +12,7 @@ use treesitter::{
     WorkspaceSymbolClient as TreeSitterWorkspaceSymbolClient,
 };
 
+use crate::config::PathFilter;
 use crate::state::{HierarchyDirection, SymbolIdentity};
 use tower_lsp::lsp_types::{Range, SymbolKind, Url};
 
@@ -73,6 +74,18 @@ impl WorkspaceSymbolClient {
         }
     }
 
+    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
+        if let Self::Lsp(client) = self {
+            client.set_path_filter(path_filter);
+        }
+    }
+
+    pub fn set_filters(&mut self, filters: crate::config::FilterConfig) {
+        if let Self::Lsp(client) = self {
+            client.set_filters(filters);
+        }
+    }
+
     pub async fn query(&self, query: &str) -> anyhow::Result<Vec<WorkspaceSymbolMatch>> {
         match self {
             Self::Lsp(client) => client.query(query).await,
@@ -109,6 +122,22 @@ impl HierarchyClient {
             Self::Lsp(client) => client.set_workspace_only(workspace_only),
             Self::TreeSitter(_) => {}
             Self::Hybrid { lsp, .. } => lsp.set_workspace_only(workspace_only),
+        }
+    }
+
+    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
+        match self {
+            Self::Lsp(client) => client.set_path_filter(path_filter),
+            Self::TreeSitter(_) => {}
+            Self::Hybrid { lsp, .. } => lsp.set_path_filter(path_filter),
+        }
+    }
+
+    pub fn set_filters(&mut self, filters: crate::config::FilterConfig) {
+        match self {
+            Self::Lsp(client) => client.set_filters(filters),
+            Self::TreeSitter(_) => {}
+            Self::Hybrid { lsp, .. } => lsp.set_filters(filters),
         }
     }
 

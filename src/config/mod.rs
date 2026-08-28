@@ -10,66 +10,18 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub const PROJECT_CONFIG_FILE: &str = ".cgraph.toml";
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SymbolFilter {
-    patterns: Vec<String>,
-}
+pub mod filter;
 
-impl SymbolFilter {
-    pub fn from_patterns<I, S>(patterns: I) -> Result<Self>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let patterns = patterns.into_iter();
-        let mut normalized = Vec::with_capacity(patterns.size_hint().0);
-        for pattern in patterns {
-            let pattern = pattern.into();
-            let pattern = pattern.trim();
-            if pattern.is_empty() {
-                bail!("symbol filter contains an empty pattern");
-            }
-            if !normalized.iter().any(|existing| existing == pattern) {
-                normalized.push(pattern.to_owned());
-            }
-        }
-        Ok(Self {
-            patterns: normalized,
-        })
-    }
-
-    pub fn is_ignored(&self, symbol_name: &str) -> bool {
-        self.patterns
-            .iter()
-            .any(|pattern| wildcard_matches(pattern, symbol_name))
-    }
-}
-
-fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
-    let pattern = pattern.chars().collect::<Vec<_>>();
-    let candidate = candidate.chars().collect::<Vec<_>>();
-    let mut previous = vec![false; candidate.len() + 1];
-    previous[0] = true;
-    for pattern_character in pattern {
-        let mut current = vec![false; candidate.len() + 1];
-        if pattern_character == '*' {
-            current[0] = previous[0];
-            for index in 1..=candidate.len() {
-                current[index] = previous[index] || current[index - 1];
-            }
-        } else {
-            for index in 1..=candidate.len() {
-                current[index] = previous[index - 1] && candidate[index - 1] == pattern_character;
-            }
-        }
-        previous = current;
-    }
-    previous[candidate.len()]
-}
+pub use filter::{
+    FILTER_ALL, FILTER_WORKSPACE, FilterAction, FilterConfig, FilterPattern, FilterRule,
+    PathFilter, SymbolFilter,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectConfig {
+    pub filters: FilterConfig,
     pub symbol_filter: SymbolFilter,
+    pub path_filter: PathFilter,
     pub workspace_only: bool,
     pub lsp: Option<LspSettings>,
 }
@@ -77,7 +29,9 @@ pub struct ProjectConfig {
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
+            filters: FilterConfig::default(),
             symbol_filter: SymbolFilter::default(),
+            path_filter: PathFilter::default(),
             workspace_only: true,
             lsp: None,
         }
@@ -169,7 +123,7 @@ fn project_config_template() -> String {
         .map(|line| format!("# {line}\n"))
         .collect::<String>();
     format!(
-        "# Optional language-server command.\n# When omitted, cgraph selects rust-analyzer, clangd or pyrefly by project markers.\n#[lsp]\n# name identifies the server profile; command is the executable to run.\n{commented_lsp}[filters]\n# Keep discovered symbols inside the project root.\nworkspace_only = true\n# Full symbol names; * matches any number of characters.\nsymbols = []\n"
+        "# Optional language-server command.\n# When omitted, cgraph selects rust-analyzer, clangd or pyrefly by project markers.\n#[lsp]\n# name identifies the server profile; command is the executable to run.\n{commented_lsp}[filters]\n# Rules are ordered; prefix symbol rules with # and re-include with !.\nworkspace_only = true\nrules = []\n"
     )
 }
 
@@ -208,9 +162,15 @@ impl ProjectConfig {
         };
         let raw = toml::from_str::<RawProjectConfig>(&contents)
             .with_context(|| format!("failed to parse project config {}", path.display()))?;
+        let filter_config = FilterConfig::from_rules(
+            raw.filters.rules.iter().cloned(),
+            raw.filters.workspace_only,
+        )
+        .with_context(|| format!("{} contains invalid filters.rules", path.display()))?;
         Ok(Self {
-            symbol_filter: SymbolFilter::from_patterns(raw.filters.symbols)
-                .with_context(|| format!("{} contains invalid filters.symbols", path.display()))?,
+            filters: filter_config.clone(),
+            symbol_filter: filter_config.symbol_filter(),
+            path_filter: filter_config.path_filter(),
             workspace_only: raw.filters.workspace_only,
             lsp: raw
                 .lsp
@@ -256,14 +216,14 @@ fn normalize_file_extensions(extensions: Vec<String>) -> Result<Vec<String>> {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawFilters {
-    symbols: Vec<String>,
+    rules: Vec<String>,
     workspace_only: bool,
 }
 
 impl Default for RawFilters {
     fn default() -> Self {
         Self {
-            symbols: Vec::new(),
+            rules: Vec::new(),
             workspace_only: true,
         }
     }
@@ -273,7 +233,7 @@ impl Default for RawFilters {
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -290,9 +250,10 @@ mod tests {
         let template = fs::read_to_string(&path).unwrap();
         assert!(template.contains("# name = \"rust-analyzer\""));
         assert!(template.contains("# file_extensions = [\"rs\"]"));
+        assert!(template.contains("rules = []"));
         fs::write(
             &path,
-            "[lsp]\nname = \" rust-analyzer \"\ncommand = \" /usr/bin/rust-analyzer \"\nargs = [\"--log-file=/tmp/ra.log\"]\nfile_extensions = [\".RS\", \" rs \", \"RS\"]\n\n[filters]\nworkspace_only = false\nsymbols = [\"*::into\", \" Option::is_some \", \"*::into\", \"*::Some\"]\n",
+            "[lsp]\nname = \" rust-analyzer \"\ncommand = \" /usr/bin/rust-analyzer \"\nargs = [\"--log-file=/tmp/ra.log\"]\nfile_extensions = [\".RS\", \" rs \", \"RS\"]\n\n[filters]\nworkspace_only = false\nrules = [\"#*::into\", \"#Option::is_some\", \"#*::Some\"]\n",
         )
         .unwrap();
         ProjectConfig::create_if_missing(&workspace).unwrap();
@@ -312,7 +273,7 @@ mod tests {
         );
         fs::write(
             &path,
-            "[lsp]\ncommand = \"/usr/bin/clangd\"\n\n[filters]\nworkspace_only = false\nsymbols = [\"*::into\", \"Option::is_some\", \"*::Some\"]\n",
+            "[lsp]\ncommand = \"/usr/bin/clangd\"\n\n[filters]\nworkspace_only = false\nrules = [\"#*::into\", \"#Option::is_some\", \"#*::Some\"]\n",
         )
         .unwrap();
         let config = ProjectConfig::load(&workspace).unwrap();
@@ -335,7 +296,7 @@ mod tests {
         let workspace = temporary_workspace("invalid");
         fs::write(
             workspace.join(".cgraph.toml"),
-            "[filters]\nsymbols = [\"  \"]\n",
+            "[filters]\nrules = [\"  \"]\n",
         )
         .unwrap();
 
@@ -344,7 +305,7 @@ mod tests {
         assert!(format!("{error:#}").contains("empty pattern"));
         fs::write(
             workspace.join(".cgraph.toml"),
-            "[filters]\nsymbols = []\nunknown = true\n",
+            "[filters]\nrules = []\nunknown = true\n",
         )
         .unwrap();
         let error = ProjectConfig::load(&workspace).unwrap_err();
@@ -377,6 +338,52 @@ mod tests {
         .unwrap();
         let error = ProjectConfig::load(&workspace).unwrap_err();
         assert!(format!("{error:#}").contains("without paths or wildcards"));
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn loads_ordered_path_rules_from_project_config() {
+        let workspace = temporary_workspace("paths");
+        fs::write(
+            workspace.join(".cgraph.toml"),
+            "[filters]\nworkspace_only = false\nrules = [\"**/generated/**\", \"!src/generated/keep.rs\"]\n",
+        )
+        .unwrap();
+        let config = ProjectConfig::load(&workspace).unwrap();
+        assert!(
+            config
+                .path_filter
+                .is_ignored(&workspace.join("src/generated/file.rs"), &workspace)
+        );
+        assert!(
+            !config
+                .path_filter
+                .is_ignored(&workspace.join("src/generated/keep.rs"), &workspace)
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn loads_workspace_scope_with_one_external_symbol_exception() {
+        let workspace = temporary_workspace("workspace-exception");
+        fs::write(
+            workspace.join(".cgraph.toml"),
+            "[filters]\nrules = [\"<workspace>\", \"!#printf\"]\n",
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load(&workspace).unwrap();
+
+        assert!(config.filters.is_ignored(
+            Some("malloc"),
+            Some(Path::new("/usr/include/stdlib.h")),
+            &workspace,
+        ));
+        assert!(!config.filters.is_ignored(
+            Some("printf"),
+            Some(Path::new("/usr/include/stdio.h")),
+            &workspace,
+        ));
         fs::remove_dir_all(workspace).unwrap();
     }
 

@@ -11,12 +11,15 @@ mod pyrefly;
 mod symbol_names;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -50,6 +53,7 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::{
+    config::{FilterConfig, PathFilter},
     fetch::{FetchSource, HierarchyQuery, HierarchyResponse},
     state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
 };
@@ -57,7 +61,6 @@ use normalize::{
     DocumentSymbolOwner, call_item_identity, deduplicate_identities, deduplicate_symbols,
     document_position, find_document_symbol_container, normalize_document_symbols,
     normalize_symbols, symbol_kind_matches_hierarchy, symbol_leaf_name, type_item_identity,
-    uri_belongs_to_workspace, workspace_symbol_is_visible,
 };
 use profile::{
     ServerProfile, ensure_pyrefly_subcommand, file_extensions,
@@ -67,9 +70,20 @@ use progress::{LspProgressTracker, handle_server_notification};
 use symbol_names::SymbolNameAdapter;
 
 #[cfg(test)]
-use normalize::symbol_belongs_to_workspace;
+use normalize::{symbol_belongs_to_workspace, workspace_symbol_is_visible};
 
 pub use crate::fetch::WorkspaceSymbolMatch;
+
+fn symbol_uri_is_visible(
+    symbol: &str,
+    uri: &Url,
+    workspace_root: &Path,
+    filters: &FilterConfig,
+) -> bool {
+    uri.to_file_path()
+        .map(|path| filters.is_visible_symbol_path(symbol, &path, workspace_root))
+        .unwrap_or(!filters.workspace_only())
+}
 
 pub fn builtin_file_extensions(server_name: &str) -> &'static [&'static str] {
     file_extensions(server_name)
@@ -86,6 +100,8 @@ pub struct LspConfig {
     pub workspace_root: PathBuf,
     pub initialization_options: Option<Value>,
     pub workspace_only: bool,
+    pub path_filter: PathFilter,
+    pub filters: FilterConfig,
     pub server_name: Option<String>,
     pub file_extensions: Vec<String>,
 }
@@ -98,6 +114,8 @@ impl LspConfig {
             workspace_root: workspace_root.into(),
             initialization_options: None,
             workspace_only: true,
+            path_filter: PathFilter::default(),
+            filters: FilterConfig::default(),
             server_name: None,
             file_extensions: Vec::new(),
         }
@@ -140,6 +158,19 @@ impl LspConfig {
 
     pub fn workspace_only(mut self, workspace_only: bool) -> Self {
         self.workspace_only = workspace_only;
+        self.filters = self.filters.with_workspace_only(workspace_only);
+        self
+    }
+
+    pub fn path_filter(mut self, path_filter: PathFilter) -> Self {
+        self.path_filter = path_filter;
+        self
+    }
+
+    pub fn filters(mut self, filters: FilterConfig) -> Self {
+        self.workspace_only = filters.workspace_only();
+        self.path_filter = filters.path_filter();
+        self.filters = filters;
         self
     }
 
@@ -190,6 +221,8 @@ pub struct WorkspaceSymbolClient {
     workspace_root: PathBuf,
     symbol_names: SymbolNameAdapter,
     workspace_only: bool,
+    path_filter: PathFilter,
+    filters: FilterConfig,
 }
 
 impl fmt::Debug for WorkspaceSymbolClient {
@@ -216,12 +249,30 @@ impl WorkspaceSymbolClient {
             .map(|response| normalize_symbols(response, self.symbol_names))
             .unwrap_or_default();
         Ok(deduplicate_symbols(symbols.into_iter().filter(|symbol| {
-            workspace_symbol_is_visible(symbol, &self.workspace_root, self.workspace_only)
+            symbol_uri_is_visible(
+                &symbol.name,
+                &symbol.uri,
+                &self.workspace_root,
+                &self.filters,
+            )
         })))
     }
 
     pub fn set_workspace_only(&mut self, workspace_only: bool) {
         self.workspace_only = workspace_only;
+        self.path_filter = self.path_filter.clone().with_workspace_only(workspace_only);
+        self.filters = self.filters.clone().with_workspace_only(workspace_only);
+    }
+
+    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
+        self.workspace_only = path_filter.workspace_only();
+        self.path_filter = path_filter;
+    }
+
+    pub fn set_filters(&mut self, filters: FilterConfig) {
+        self.workspace_only = filters.workspace_only();
+        self.path_filter = filters.path_filter();
+        self.filters = filters;
     }
 }
 
@@ -233,6 +284,8 @@ pub struct HierarchyClient {
     document_symbols: DocumentSymbolCache,
     capabilities: Arc<ServerHierarchyCapabilities>,
     workspace_only: bool,
+    path_filter: PathFilter,
+    filters: FilterConfig,
 }
 
 type DocumentSymbolCache = Arc<Mutex<HashMap<Url, Arc<OnceCell<Vec<DocumentSymbolOwner>>>>>>;
@@ -316,6 +369,9 @@ impl HierarchyClient {
         }
         let (document_position, resolved_location) =
             self.resolve_document_position(&query.symbol).await?;
+        self.client
+            .ensure_document_open(&document_position.text_document.uri)
+            .await?;
         query.symbol.location = Some(resolved_location);
         let children = match query.symbol.kind {
             HierarchyKind::Call => {
@@ -357,6 +413,8 @@ impl HierarchyClient {
             workspace_root: self.workspace_root.clone(),
             symbol_names: self.symbol_names,
             workspace_only: self.workspace_only,
+            path_filter: self.path_filter.clone(),
+            filters: self.filters.clone(),
         }
         .query(lookup_name)
         .await?
@@ -460,7 +518,7 @@ impl HierarchyClient {
     ) -> Result<Vec<SymbolIdentity>> {
         let mut identities = Vec::with_capacity(items.len());
         for item in items.into_iter().filter(|item| {
-            !self.workspace_only || uri_belongs_to_workspace(&item.uri, &self.workspace_root)
+            symbol_uri_is_visible(&item.name, &item.uri, &self.workspace_root, &self.filters)
         }) {
             let container = if self.symbol_names.uses_document_symbols() {
                 self.document_symbol_container(&item).await
@@ -566,7 +624,7 @@ impl HierarchyClient {
             .unwrap_or_default()
             .into_iter()
             .filter(|item| {
-                !self.workspace_only || uri_belongs_to_workspace(&item.uri, &self.workspace_root)
+                symbol_uri_is_visible(&item.name, &item.uri, &self.workspace_root, &self.filters)
             })
             .map(type_item_identity)
             .collect())
@@ -574,6 +632,19 @@ impl HierarchyClient {
 
     pub fn set_workspace_only(&mut self, workspace_only: bool) {
         self.workspace_only = workspace_only;
+        self.path_filter = self.path_filter.clone().with_workspace_only(workspace_only);
+        self.filters = self.filters.clone().with_workspace_only(workspace_only);
+    }
+
+    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
+        self.workspace_only = path_filter.workspace_only();
+        self.path_filter = path_filter;
+    }
+
+    pub fn set_filters(&mut self, filters: FilterConfig) {
+        self.workspace_only = filters.workspace_only();
+        self.path_filter = filters.path_filter();
+        self.filters = filters;
     }
 }
 
@@ -586,9 +657,10 @@ pub struct LspProvider {
     symbol_names: SymbolNameAdapter,
     document_symbols: DocumentSymbolCache,
     hierarchy_capabilities: Arc<ServerHierarchyCapabilities>,
-    bootstrap_document: Option<Url>,
     status_receiver: Option<mpsc::UnboundedReceiver<LspStatusUpdate>>,
     workspace_only: bool,
+    path_filter: PathFilter,
+    filters: FilterConfig,
 }
 
 impl fmt::Debug for LspProvider {
@@ -699,7 +771,7 @@ impl LspProvider {
             .map(|info| info.name.as_str());
         let detected_server_name = config.server_name.as_deref().or(advertised_server_name);
         let symbol_names = SymbolNameAdapter::detect(&config.program, detected_server_name);
-        let bootstrap_document = if symbol_names.is_pyrefly() {
+        let _bootstrap_document = if symbol_names.is_pyrefly() {
             match pyrefly::bootstrap_document(&workspace_root, &config.file_extensions) {
                 Some(document) => {
                     client
@@ -716,6 +788,7 @@ impl LspProvider {
                         )
                         .await
                         .context("failed to open Pyrefly index bootstrap document")?;
+                    client.mark_document_open(&document.uri).await;
                     Some(document.uri)
                 }
                 None => None,
@@ -728,6 +801,7 @@ impl LspProvider {
             || advertised_server_name
                 .is_some_and(|name| server_profile_from_name(name) == ServerProfile::Clangd)
         {
+            client.enable_document_opening();
             match clangd::bootstrap_document(&workspace_root, &config.file_extensions) {
                 Some(document) => {
                     client
@@ -744,6 +818,7 @@ impl LspProvider {
                         )
                         .await
                         .context("failed to open clangd index bootstrap document")?;
+                    client.mark_document_open(&document.uri).await;
                     Some(document.uri)
                 }
                 None => None,
@@ -760,9 +835,10 @@ impl LspProvider {
             symbol_names,
             document_symbols: Arc::new(Mutex::new(HashMap::new())),
             hierarchy_capabilities,
-            bootstrap_document,
             status_receiver: Some(status_receiver),
             workspace_only: config.workspace_only,
+            path_filter: config.path_filter,
+            filters: config.filters,
         })
     }
 
@@ -786,6 +862,8 @@ impl LspProvider {
             workspace_root: self.workspace_root.clone(),
             symbol_names: self.symbol_names,
             workspace_only: self.workspace_only,
+            path_filter: self.path_filter.clone(),
+            filters: self.filters.clone(),
         }
     }
 
@@ -797,6 +875,8 @@ impl LspProvider {
             document_symbols: Arc::clone(&self.document_symbols),
             capabilities: Arc::clone(&self.hierarchy_capabilities),
             workspace_only: self.workspace_only,
+            path_filter: self.path_filter.clone(),
+            filters: self.filters.clone(),
         }
     }
 
@@ -805,17 +885,7 @@ impl LspProvider {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
-        if let Some(uri) = self.bootstrap_document.take() {
-            let _ = self
-                .client
-                .notify(
-                    "textDocument/didClose",
-                    DidCloseTextDocumentParams {
-                        text_document: TextDocumentIdentifier::new(uri),
-                    },
-                )
-                .await;
-        }
+        let documents_close_result = self.client.close_open_documents().await;
         let shutdown_result = self
             .client
             .request::<_, ()>(Shutdown::METHOD, ())
@@ -837,7 +907,7 @@ impl LspProvider {
         self.connection_task.abort();
         let _ = self.connection_task.await;
 
-        shutdown_result
+        shutdown_result.and(documents_close_result)
     }
 }
 
@@ -881,6 +951,8 @@ fn uses_utf16_positions(position_encoding: Option<&PositionEncodingKind>) -> boo
 struct JsonRpcClient {
     commands: mpsc::Sender<JsonRpcCommand>,
     cancellations: mpsc::UnboundedSender<u64>,
+    opened_documents: Arc<Mutex<HashSet<Url>>>,
+    auto_open_documents: Arc<AtomicBool>,
 }
 
 enum JsonRpcCommand {
@@ -977,6 +1049,74 @@ impl JsonRpcClient {
             .map_err(|_| anyhow::anyhow!("LSP connection closed during notification {method}"))?
             .map_err(anyhow::Error::msg)
     }
+
+    async fn mark_document_open(&self, uri: &Url) {
+        self.opened_documents.lock().await.insert(uri.clone());
+    }
+
+    fn enable_document_opening(&self) {
+        self.auto_open_documents.store(true, Ordering::Release);
+    }
+
+    async fn ensure_document_open(&self, uri: &Url) -> Result<()> {
+        if !self.auto_open_documents.load(Ordering::Acquire) || uri.scheme() != "file" {
+            return Ok(());
+        }
+        let mut opened_documents = self.opened_documents.lock().await;
+        if opened_documents.contains(uri) {
+            return Ok(());
+        }
+
+        let path = uri
+            .to_file_path()
+            .map_err(|()| anyhow::anyhow!("cannot open non-file URI {uri}"))?;
+        let Some(language_id) = language_id_for_path(&path) else {
+            return Ok(());
+        };
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read LSP document {}", path.display()))?;
+        self.notify(
+            "textDocument/didOpen",
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: language_id.to_owned(),
+                    version: 0,
+                    text,
+                },
+            },
+        )
+        .await
+        .with_context(|| format!("failed to open LSP document {uri}"))?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        opened_documents.insert(uri.clone());
+        Ok(())
+    }
+
+    async fn close_open_documents(&self) -> Result<()> {
+        let documents = self
+            .opened_documents
+            .lock()
+            .await
+            .drain()
+            .collect::<Vec<_>>();
+        let mut first_error = None;
+        for uri in documents {
+            if let Err(error) = self
+                .notify(
+                    "textDocument/didClose",
+                    DidCloseTextDocumentParams {
+                        text_document: TextDocumentIdentifier::new(uri),
+                    },
+                )
+                .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 fn spawn_json_rpc<R, W>(
@@ -1002,6 +1142,7 @@ where
     let (cancellation_sender, cancellation_receiver) = mpsc::unbounded_channel();
     let (status_sender, status_receiver) = mpsc::unbounded_channel();
     let (incoming_sender, incoming_receiver) = mpsc::channel(64);
+    let opened_documents = Arc::new(Mutex::new(HashSet::new()));
     let hierarchy_capabilities = Arc::new(ServerHierarchyCapabilities::default());
     let reader_task = tokio::spawn(read_messages(reader, incoming_sender));
     let actor_hierarchy_capabilities = Arc::clone(&hierarchy_capabilities);
@@ -1028,6 +1169,8 @@ where
     let client = JsonRpcClient {
         commands: command_sender,
         cancellations: cancellation_sender,
+        opened_documents,
+        auto_open_documents: Arc::new(AtomicBool::new(false)),
     };
     (
         client,
@@ -1337,6 +1480,22 @@ fn workspace_name(workspace_root: &Path) -> String {
         .to_owned()
 }
 
+fn language_id_for_path(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("rs") => Some("rust"),
+        Some("py") | Some("pyi") => Some("python"),
+        Some("c") => Some("c"),
+        Some("cc") | Some("cpp") | Some("cxx") | Some("h") | Some("hh") | Some("hpp")
+        | Some("hxx") | Some("ixx") | Some("cppm") => Some("cpp"),
+        _ => None,
+    }
+}
+
 fn workspace_symbol_supported(initialize_result: &InitializeResult) -> bool {
     match &initialize_result.capabilities.workspace_symbol_provider {
         Some(OneOf::Left(supported)) => *supported,
@@ -1461,6 +1620,7 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
+    use crate::config::{FilterConfig, PathFilter};
     use serde_json::{Value, json};
     use tokio::io::{BufReader, duplex, split};
     use tokio::time::timeout;
@@ -1653,6 +1813,8 @@ mod tests {
             document_symbols: Default::default(),
             capabilities,
             workspace_only: true,
+            path_filter: PathFilter::default(),
+            filters: FilterConfig::default(),
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -1793,6 +1955,8 @@ mod tests {
             document_symbols: Default::default(),
             capabilities: Arc::clone(&capabilities),
             workspace_only: true,
+            path_filter: PathFilter::default(),
+            filters: FilterConfig::default(),
         };
         let query = HierarchyQuery {
             symbol: SymbolIdentity {
@@ -1901,6 +2065,8 @@ mod tests {
             document_symbols: Default::default(),
             capabilities,
             workspace_only: true,
+            path_filter: PathFilter::default(),
+            filters: FilterConfig::default(),
         };
         let hybrid = FetchHierarchyClient::with_fallback(lsp, tree_sitter.hierarchy_client());
 
@@ -2455,6 +2621,73 @@ mod tests {
         assert_eq!(main.name, "main");
         assert_eq!(main.kind, SymbolKind::FUNCTION);
         assert_eq!(main.uri, Url::from_file_path(&source).unwrap());
+
+        lsp.shutdown().await.unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn opens_clangd_header_before_hierarchy_query() {
+        if !external_server_available("clangd").await {
+            eprintln!(
+                "skipping real clangd header hierarchy regression test: clangd is not in PATH"
+            );
+            return;
+        }
+
+        let workspace = external_server_workspace("clangd-header-hierarchy");
+        let source = workspace.join("hello.cpp");
+        let header = workspace.join("hello.h");
+        fs::write(
+            workspace.join("compile_commands.json"),
+            serde_json::to_vec(&vec![json!({
+                "directory": workspace,
+                "file": source,
+                "arguments": ["clang++", "-std=c++17", "-c", source],
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &source,
+            "#include \"hello.h\"\nint main() { bar(); return 0; }\n",
+        )
+        .unwrap();
+        fs::write(&header, "#pragma once\nvoid bar() {}\n").unwrap();
+
+        let lsp = timeout(
+            Duration::from_secs(60),
+            LspProvider::start(LspConfig::for_server("clangd", &workspace)),
+        )
+        .await
+        .expect("clangd header hierarchy initialization timed out")
+        .unwrap();
+        let bar = wait_for_workspace_symbol_in_file(&lsp, "bar", &header).await;
+        assert_eq!(bar.name, "bar");
+        assert_eq!(bar.kind, SymbolKind::FUNCTION);
+        let hierarchy_client = lsp.hierarchy_client();
+        let incoming_query = HierarchyQuery {
+            symbol: SymbolIdentity {
+                symbol: bar.name.clone(),
+                kind: HierarchyKind::Call,
+                location: None,
+            },
+            direction: HierarchyDirection::Incoming,
+        };
+        let outgoing_query = HierarchyQuery {
+            symbol: incoming_query.symbol.clone(),
+            direction: HierarchyDirection::Outgoing,
+        };
+        let (incoming, outgoing) = tokio::join!(
+            hierarchy_client.query(incoming_query),
+            hierarchy_client.query(outgoing_query)
+        );
+        let incoming =
+            incoming.expect("clangd failed to prepare incoming hierarchy for an opened header");
+        let outgoing =
+            outgoing.expect("clangd failed to prepare outgoing hierarchy for an opened header");
+        assert!(incoming.children.iter().any(|child| child.symbol == "main"));
+        assert!(outgoing.children.is_empty());
 
         lsp.shutdown().await.unwrap();
         fs::remove_dir_all(workspace).unwrap();

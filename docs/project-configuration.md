@@ -21,15 +21,12 @@ file_extensions = ["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]
 ```toml
 [filters]
 workspace_only = true
-symbols = [
-  "*::into",
-  "Option::is_some",
-  "*::Some",
-  "*.run",
-]
+rules = ["#<all>", "!#main", "!#Cli::run", "**/generated/**", "!src/generated/keep.rs"]
 ```
 
-`filters.workspace_only` 默认是 `true`，会同时限制 workspace symbol 搜索和 LSP hierarchy 返回项：只有位于当前 workspace 根目录下的 `file://` URI 才会进入图。若确实需要查看语言服务器返回的系统头文件或第三方依赖，可以设置：
+规则按数组顺序从前往后应用，普通规则排除，`!` 规则重新包含，最后一个命中的规则获胜。普通规则按 workspace-relative 路径匹配；以 `#` 开头的规则按完整限定名匹配。`#<all>` 表示所有符号；符号 `*` 可匹配任意字符。路径 `*` 不跨目录，`**` 可跨目录，且不含 `/` 的模式会匹配任意目录中的文件名。
+
+`filters.workspace_only` 默认是 `true`，会同时限制 workspace symbol 搜索和 LSP hierarchy 返回项：只有位于当前 workspace 根目录下的 `file://` URI 才会进入图。也可以在 `rules` 中使用 `<workspace>`（排除 workspace 外路径）和 `!<workspace>`（重新放行）表达同样的范围策略。若确实需要查看语言服务器返回的系统头文件或第三方依赖，可以设置：
 
 ```toml
 [filters]
@@ -38,12 +35,21 @@ workspace_only = false
 
 关闭范围过滤只表示 cgraph 保留这些外部节点；外部节点能否继续展开仍取决于语言服务器的文档生命周期要求。比如 clangd 可能要求客户端先打开系统头文件，展开 `printf` 仍可能返回 `trying to get AST for non-added document`。
 
-规则针对界面中的完整显示名，并且必须匹配整个名称：
+如果只想保留当前 workspace，同时为一个外部符号开例外，可以利用跨类型规则的书写顺序：
+
+```toml
+[filters]
+rules = ["<workspace>", "!#printf"]
+```
+
+第一条路径规则排除 workspace 外的所有候选；第二条更晚的符号规则只把完整名称为 `printf` 的候选重新包含。
+
+符号规则（`#` 前缀）针对界面中的完整显示名，并且必须匹配整个名称；普通规则排除、`!` 规则重新包含：
 
 - 普通函数使用 server 返回的名称，例如 `main`。
 - 方法和构造器在对应 provider 能够确定类或容器时显示完整限定名；Rust/C++ 使用 `Class::method`，Python 使用 `Class.method`。
 - Rust 没有 class 关键字；cgraph 使用方法所属的 struct、enum 或 trait 名。trait impl 使用具体实现类型，例如 `impl Read for Buffer` 显示为 `Buffer::read`。
-- `*` 匹配零个或多个字符，包括 `::`；这是当前唯一的通配符。
+- `*` 匹配零个或多个字符，包括 `::`。
 - 匹配区分大小写，所以 `*::Some` 不会过滤 `Option::some`。
 - 规则必须使用实际显示分隔符；`*::run` 不会匹配 Python 的 `Worker.run`，应写成 `*.run`。
 - 没有通配符的规则是整串精确匹配；`Option::is_some` 不会过滤 `Result::is_some`。
@@ -66,8 +72,8 @@ Canvas 模式输入 `ec` 会离开备用屏幕，并用 `$EDITER` 打开当前 w
 [filters]
 # Keep discovered symbols inside the project root.
 workspace_only = true
-# Full symbol names; * matches any number of characters.
-symbols = []
+# Ordered rules; prefix symbol patterns with #.
+rules = []
 ```
 
 项目按需求使用变量名 `$EDITER`；如果没有设置，cgraph 兼容标准的 `$EDITOR`。变量值必须是可直接执行的程序或路径，例如：

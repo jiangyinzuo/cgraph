@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::path::Path;
 
 use tower_lsp::lsp_types::{
@@ -24,6 +25,7 @@ pub(super) fn symbol_leaf_name(symbol: &str) -> &str {
         .unwrap_or(symbol)
 }
 
+#[cfg(test)]
 pub(super) fn symbol_belongs_to_workspace(
     symbol: &WorkspaceSymbolMatch,
     workspace_root: &Path,
@@ -31,6 +33,7 @@ pub(super) fn symbol_belongs_to_workspace(
     uri_belongs_to_workspace(&symbol.uri, workspace_root)
 }
 
+#[cfg(test)]
 pub(super) fn workspace_symbol_is_visible(
     symbol: &WorkspaceSymbolMatch,
     workspace_root: &Path,
@@ -39,6 +42,7 @@ pub(super) fn workspace_symbol_is_visible(
     !workspace_only || symbol_belongs_to_workspace(symbol, workspace_root)
 }
 
+#[cfg(test)]
 pub(super) fn uri_belongs_to_workspace(uri: &Url, workspace_root: &Path) -> bool {
     uri.to_file_path()
         .is_ok_and(|path| path.starts_with(workspace_root))

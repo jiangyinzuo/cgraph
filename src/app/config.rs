@@ -1,5 +1,5 @@
 use crate::{
-    config::SymbolFilter,
+    config::{FilterConfig, PathFilter, SymbolFilter},
     fetch::CachePolicy,
     state::{HierarchyDirection, LoadState},
 };
@@ -9,6 +9,36 @@ use super::{App, HierarchyLoadRequest};
 impl App {
     pub fn set_symbol_filter(&mut self, symbol_filter: SymbolFilter) {
         self.symbol_filter = symbol_filter;
+    }
+
+    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
+        self.path_filter = path_filter;
+    }
+
+    pub fn set_filters(&mut self, filters: FilterConfig) {
+        self.symbol_filter = filters.symbol_filter();
+        self.path_filter = filters.path_filter();
+        self.filters = filters;
+    }
+
+    pub fn reload_filters(
+        &mut self,
+        symbol_filter: SymbolFilter,
+        path_filter: PathFilter,
+        hierarchy_available: bool,
+    ) -> Vec<HierarchyLoadRequest> {
+        self.path_filter = path_filter;
+        self.reload_symbol_filter(symbol_filter, hierarchy_available)
+    }
+
+    pub fn reload_filter_config(
+        &mut self,
+        filters: FilterConfig,
+        hierarchy_available: bool,
+    ) -> Vec<HierarchyLoadRequest> {
+        self.path_filter = filters.path_filter();
+        self.filters = filters.clone();
+        self.reload_symbol_filter(filters.symbol_filter(), hierarchy_available)
     }
 
     pub fn reload_symbol_filter(

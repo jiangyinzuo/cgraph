@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let project_config = ProjectConfig::load(&workspace)?;
     let lsp_config = lsp_config(&cli, &project_config);
     let mut app = App::from_cli(cli);
-    app.set_symbol_filter(project_config.symbol_filter);
+    app.set_filters(project_config.filters.clone());
     let mut ipc_server = match ipc_socket {
         Some(socket_path) => Some(IpcServer::start(socket_path)?),
         None => None,
@@ -170,7 +170,9 @@ fn lsp_config(cli: &Cli, project_config: &ProjectConfig) -> Option<LspConfig> {
         (program, Vec::new(), name, None)
     };
     let config = LspConfig::for_server(program, &cli.workspace)
-        .workspace_only(project_config.workspace_only);
+        .workspace_only(project_config.workspace_only)
+        .path_filter(project_config.path_filter.clone())
+        .filters(project_config.filters.clone());
     let config = match name {
         Some(name) => config.server_name(name),
         None => config,
@@ -232,7 +234,7 @@ mod tests {
     use cgraph::{
         app::{AnalysisBackend, AnalysisPhase, App},
         cli::Cli,
-        config::{LspSettings, ProjectConfig, SymbolFilter},
+        config::{LspSettings, PathFilter, ProjectConfig, SymbolFilter},
         fetch::HierarchyQuery,
         state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
     };
@@ -337,7 +339,10 @@ mod tests {
     fn project_lsp_configuration_overrides_builtin_detection() {
         let cli = Cli::try_parse_from(["cgraph", "--workspace", "/workspace"]).unwrap();
         let project_config = ProjectConfig {
+            filters: cgraph::config::FilterConfig::from_rules(std::iter::empty::<&str>(), true)
+                .unwrap(),
             symbol_filter: SymbolFilter::default(),
+            path_filter: PathFilter::default(),
             workspace_only: true,
             lsp: Some(LspSettings {
                 name: "clangd".to_owned(),

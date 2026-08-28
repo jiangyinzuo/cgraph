@@ -1,20 +1,20 @@
 [filters]
-symbols = [
-    "String::*",
-    "OsStr::*",
-    "Cow::*",
-    "PathBuf::*",
-    "Vec::*",
-    "Error::*",
-    "*::into",
-    "*::is_some",
-    "Some",
-    "Ok",
-    "clone",
-    "*::is_mut",
-    "*::is_ref",
-    "Option::*",
-    "Result::*",
-    "into",
-    "str::*"
+rules = [
+    "#String::*",
+    "#OsStr::*",
+    "#Cow::*",
+    "#PathBuf::*",
+    "#Vec::*",
+    "#Error::*",
+    "#*::into",
+    "#*::is_some",
+    "#Some",
+    "#Ok",
+    "#clone",
+    "#*::is_mut",
+    "#*::is_ref",
+    "#Option::*",
+    "#Result::*",
+    "#into",
+    "#str::*"
 ]

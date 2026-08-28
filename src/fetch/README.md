@@ -27,9 +27,9 @@ LSP actor 的协议边界保持通用：它发送标准 initialize、initialized
 
 `WorkspaceSymbolClient::query` 把当前完整文本直接交给 server，不尝试枚举完整索引，也允许空字符串。TUI 负责与 VS Code 相同的约 200 ms 防抖节奏；Fetch 层只负责一次查询的协议语义。server 返回后先删除完全相同的符号，再按 URI 做项目范围过滤：只有能够转换为本地文件路径且位于 canonical workspace root 下的符号才保留。
 
-rust-analyzer 默认的 workspace symbol 只搜索类型。cgraph 会把 `scope=workspace` 与 `kind=all_symbols` 递归合并进 initialization options，同时保留调用方的其他设置；`workspace/configuration` 也返回相同策略。cgraph 不覆盖默认 limit，因为 rust-analyzer 的 128 项默认值就是为“客户端随过滤文本重新查询”的模式设计的。服务端差异必须收敛在 Fetch 层，App/TUI 不应知道 `#`、`*` 等 rust-analyzer 私有查询标记。
+rust-analyzer 默认的 workspace symbol 只搜索类型。cgraph 会把 `scope=workspace` 与 `kind=all_symbols` 递归合并进 initialization options，同时保留调用方的其他设置；`workspace/configuration` 也返回相同策略。cgraph 不覆盖默认 limit，因为 rust-analyzer 的 128 项默认值就是为“客户端随过滤文本重新查询”的模式设计的。服务端差异必须收敛在 Fetch 层，App/TUI 不应知道 rust-analyzer 的私有查询标记。
 
-URI 过滤是对 server scope 的额外保护，确保依赖和工作区外路径默认不进入候选。虚拟文档和非文件 URI 当前同样会被排除；未来若支持远程 workspace，需要把范围判断抽象为 URI containment policy。
+URI 过滤是对 server scope 的额外保护，确保依赖和工作区外路径默认不进入候选。项目配置的单一 `[filters].rules` 列表中，普通规则匹配 workspace-relative 文件路径，以 `#` 开头的规则匹配符号名；`!` 按书写顺序重新包含。虚拟文档和非文件 URI 当前同样会被排除；未来若支持远程 workspace，需要把范围判断抽象为 URI containment policy。
 
 ## 请求取消
 
@@ -75,7 +75,7 @@ rust-analyzer `experimental/serverStatus` 的 `health=warning/error` 映射为�
 
 `HierarchyQuery` 描述语义符号、call/type 模式和 incoming/outgoing 方向；`HierarchyResponse` 记录归一化孩子和数据来源。`HierarchyClient` 对精确位置执行标准两阶段请求；CLI 根没有位置时，先执行 workspace symbol 精确解析，同名候选不唯一则返回错误而不是任选一个重载。
 
-call hierarchy 使用 prepare 后的 `CallHierarchyItem` 请求 incoming/outgoing calls；type hierarchy 使用 `TypeHierarchyItem` 请求 supertypes/subtypes。协议 item 的 `data` 在第二阶段请求中保留。`detail` 不是结构化容器字段，只能由对应 LSP adapter 解释；当前 rust-analyzer 会把方法标成 `Function` 并把签名放在 `detail`，所以 Rust adapter 额外按文件请求并缓存 document symbols，用标准 `containerName` 生成 `Type::name`，失败时保留原名。LSP hierarchy 的返回项与 workspace symbol 使用同一项目范围策略：默认只有 `file://` URI 且路径位于 canonical workspace root 下的项才进入 `HierarchyResponse`；`.cgraph.toml` 的 `[filters].workspace_only = false` 可以关闭这一范围过滤。这样 clangd 从项目函数返回 `/usr/include` 中的 `printf` 时，默认不会把未 `didOpen` 的系统头文件加入图，也不会在用户展开它时触发 `trying to get AST for non-added document`；项目内文件的协议错误仍原样反馈给消息 pager。Fetch 会按 `SymbolIdentity` 去重 provider 响应，App 在写入 incoming/outgoing 缓存前应用项目过滤并做防御性分支内去重；State 按层次类型与源码位置全局复用同一 `NodeId`，同时保留不同方向观察到的边。
+call hierarchy 使用 prepare 后的 `CallHierarchyItem` 请求 incoming/outgoing calls；type hierarchy 使用 `TypeHierarchyItem` 请求 supertypes/subtypes。协议 item 的 `data` 在第二阶段请求中保留。`detail` 不是结构化容器字段，只能由对应 LSP adapter 解释；当前 rust-analyzer 会把方法标成 `Function` 并把签名放在 `detail`，所以 Rust adapter 额外按文件请求并缓存 document symbols，用标准 `containerName` 生成 `Type::name`，失败时保留原名。clangd hierarchy 在 prepare 前按需打开目标源码；同一 URI 每个会话只发送一次 `didOpen`，退出时统一发送 `didClose`，因此 workspace symbol 位于非 bootstrap 头文件时也能继续查询。LSP hierarchy 的返回项与 workspace symbol 使用同一项目范围策略：默认只有 `file://` URI 且路径位于 canonical workspace root 下的项才进入 `HierarchyResponse`；`.cgraph.toml` 的 `[filters].workspace_only = false` 可以关闭这一范围过滤。这样 clangd 从项目函数返回 `/usr/include` 中的 `printf` 时，默认不会把系统头文件加入图；关闭过滤后客户端会尝试打开可读文件，但 clangd 是否有可用 compile command 仍决定该节点能否展开。项目内文件的协议错误仍原样反馈给消息 pager。Fetch 会按 `SymbolIdentity` 去重 provider 响应，App 在写入 incoming/outgoing 缓存前应用项目过滤并做防御性分支内去重；State 按层次类型与源码位置全局复用同一 `NodeId`，同时保留不同方向观察到的边。
 
 call hierarchy 可以在 initialize result 中静态声明，也可以动态注册；type hierarchy 在 LSP 3.17 中只通过 `client/registerCapability` 注册。客户端将两项 `dynamicRegistration` 声明为 `true`，actor 按 registration id 追踪注册与注销。查询发出前必须检查当前能力，未声明的方法不能靠“试一次并接受 `-32601`”探测，因为这会把可预知的能力缺失污染为用户错误。
 

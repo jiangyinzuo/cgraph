@@ -231,10 +231,10 @@ pub fn run(
                     )?;
                     if let Some(reload) = reload {
                         if let Some(client) = symbol_client.as_mut() {
-                            client.set_workspace_only(reload.workspace_only);
+                            client.set_filters(reload.filters.clone());
                         }
                         if let Some(client) = hierarchy_client.as_mut() {
-                            client.set_workspace_only(reload.workspace_only);
+                            client.set_filters(reload.filters.clone());
                         }
                         if let Some(client) = hierarchy_client.clone() {
                             for request in reload.requests {
