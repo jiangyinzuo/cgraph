@@ -21,6 +21,7 @@ anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 crossterm = { version = "0.29", features = ["osc52"] }
 petgraph = { version = "0.8", default-features = false, features = ["std", "stable_graph"] }
+nucleo-matcher = "0.3.1"
 ratatui = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

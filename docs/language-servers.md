@@ -76,7 +76,7 @@ cgraph 会持续读取标准 `$/progress` work-done 通知，并显示最近更�
 
 语言服务器可能在 initialize 后继续索引。cgraph 会在后台处理 `workspace/configuration` 等反向请求，所以索引不会因为 UI 空闲而停住；但大型项目的第一次查询仍可能较慢或暂时为空。
 
-cgraph 采用与 VS Code workspace symbol quick access 相同的查询节奏。打开 `ac` / `at` 或输入发生变化后，会等待约 200 ms；期间再次输入会重置计时。等待结束后，当前完整文本交给当前 provider。LSP 模式通过 `workspace/symbol` 发送给 server，包括空文本；Tree-sitter 模式从惰性项目索引返回全部候选，再由 App 做相同的本地模糊筛选。
+cgraph 采用与 VS Code workspace symbol quick access 相同的查询节奏。打开 `ac` / `at` 或输入发生变化后，会等待约 200 ms；期间再次输入会重置计时。输入按空白拆分，等待结束后只有第一项文本通过 `workspace/symbol` 发送给 LSP；后续项保留在 App 内，对已返回候选执行本地模糊筛选。空输入仍以空文本发送。Tree-sitter 模式从惰性项目索引返回候选，再由 App 做相同的本地筛选。
 
 UI 在等待阶段显示 `Waiting for typing pause…`。防抖结束后，后台任务先通知 App 请求已经开始，再调用 provider client，此时状态才切换为 `Searching workspace symbols…`。这两个状态分别表示客户端本地等待和实际 provider 查询；Tree-sitter 的第一次查询包含项目索引时间。
 
@@ -84,9 +84,9 @@ UI 在等待阶段显示 `Waiting for typing pause…`。防抖结束后，后�
 
 rust-analyzer 默认只搜索类型。cgraph 在 initialization options 和 `workspace/configuration` 中设置 `kind=all_symbols` 与 `scope=workspace`，使 call 搜索可以获得函数，同时不包含依赖；结果数量保留 rust-analyzer 为逐查询客户端设计的默认 128 项上限。其他 server 直接接收标准查询文本。
 
-provider 返回后，cgraph 会按符号身份去重、按 call/type 所需的 `SymbolKind` 过滤并进行本地模糊评分。默认情况下 LSP 结果还会只保留 URI 位于 canonical workspace 根目录下的符号；项目配置 `[filters].workspace_only = false` 可以关闭这一范围过滤。Tree-sitter 从一开始只扫描项目源文件，并跳过隐藏目录、`target`、`node_modules` 和符号链接。
+provider 返回后，cgraph 会按符号身份去重、按 call/type 所需的 `SymbolKind` 过滤，并使用 `nucleo-matcher` 进行 Unicode-aware、不区分大小写的本地模糊筛选。第一项匹配 symbol name；后续项匹配 symbol name、container name 与 URI 路径。默认情况下 LSP 结果还会只保留 URI 位于 canonical workspace 根目录下的符号；项目配置 `[filters].workspace_only = false` 可以关闭这一范围过滤。Tree-sitter 从一开始只扫描项目源文件，并跳过隐藏目录、`target`、`node_modules` 和符号链接。
 
-Pyrefly 自身只在 query 至少有 3 个字符时执行 workspace-symbol 搜索；空文本、1 个字符或 2 个字符会返回空结果。cgraph 仍按统一节奏发送每次完整 query，不在 UI 中制造额外门槛，也不会为 server 未返回的内容伪造候选。Pyrefly 默认的后台索引模式声明标准 call/type hierarchy；使用 `--indexing-mode none` 会由 server 关闭这些能力。Pyrefly hierarchy 中能够确认的方法按 `Class.method` 显示，模块函数保持原名。
+Pyrefly 自身只在 query 至少有 3 个字符时执行 workspace-symbol 搜索；空文本、1 个字符或 2 个字符会返回空结果。cgraph 仍按统一节奏发送第一项 query，不在 UI 中制造额外门槛，也不会为 server 未返回的内容伪造候选。Pyrefly 默认的后台索引模式声明标准 call/type hierarchy；使用 `--indexing-mode none` 会由 server 关闭这些能力。Pyrefly hierarchy 中能够确认的方法按 `Class.method` 显示，模块函数保持原名。
 
 为触发 Pyrefly 的 lazy workspace index，cgraph 会只读打开一个受限大小的项目 Python 文件，并在 LSP shutdown 前关闭它；不会发送 change 或 save。文件发现会跳过隐藏目录、构建目录、虚拟环境、依赖目录和符号链接。若项目内没有安全可读的 `.py` 文件，LSP 连接仍会建立，但首次符号查询可能为空。
 

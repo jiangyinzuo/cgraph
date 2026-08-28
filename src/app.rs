@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use tower_lsp::lsp_types::Url;
 
 mod config;
+mod fuzzy;
 mod help;
 mod save;
 mod search;
@@ -724,7 +725,12 @@ impl App {
         Some(SearchRequest {
             request_id,
             kind: search.kind,
-            query: search.input.clone(),
+            query: search
+                .input
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_owned(),
         })
     }
 }
@@ -846,6 +852,7 @@ mod tests {
         for character in "run service".chars() {
             request = app.push_search_char(character);
         }
+        assert_eq!(request.as_ref().unwrap().query, "run");
         let mut service_run = item("run");
         service_run.container_name = Some("Service".to_owned());
         let mut controller_run = item("run");
@@ -864,6 +871,47 @@ mod tests {
             .map(|item| item.container_name.as_deref().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, ["Service"]);
+    }
+
+    #[test]
+    fn empty_query_keeps_all_candidates_visible() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        let request = app.open_search(SearchKind::Call, true).unwrap();
+        assert_eq!(request.query, "");
+        app.finish_search(
+            request.request_id,
+            Ok(vec![item("zeta"), item("alpha"), item("中间")]),
+        );
+
+        let names = app
+            .search
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["alpha", "zeta", "中间"]);
+    }
+
+    #[test]
+    fn matches_multiple_trailing_terms_in_unicode_paths() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        app.open_search(SearchKind::Call, true).unwrap();
+        let mut request = None;
+        for character in "run 服务 rs".chars() {
+            request = app.push_search_char(character);
+        }
+        assert_eq!(request.as_ref().unwrap().query, "run");
+
+        let mut candidate = item("run");
+        candidate.location = "file:///workspace/服务.rs:1".to_owned();
+        app.finish_search(request.unwrap().request_id, Ok(vec![candidate]));
+
+        assert_eq!(
+            app.search.as_ref().unwrap().items[0].location,
+            "file:///workspace/服务.rs:1"
+        );
     }
 
     #[test]

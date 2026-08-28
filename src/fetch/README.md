@@ -25,7 +25,7 @@ LSP actor 的协议边界保持通用：它发送标准 initialize、initialized
 
 ## VS Code 式 workspace symbol 查询
 
-`WorkspaceSymbolClient::query` 把当前完整文本直接交给 server，不尝试枚举完整索引，也允许空字符串。TUI 负责与 VS Code 相同的约 200 ms 防抖节奏；Fetch 层只负责一次查询的协议语义。server 返回后先删除完全相同的符号，再按 URI 做项目范围过滤：只有能够转换为本地文件路径且位于 canonical workspace root 下的符号才保留。
+`WorkspaceSymbolClient::query` 接收搜索输入按空白分隔后的第一项，不尝试枚举完整索引，也允许空字符串。TUI 负责与 VS Code 相同的约 200 ms 防抖节奏，后续输入项由 App 在候选元数据上本地筛选；Fetch 层只负责一次查询的协议语义。server 返回后先删除完全相同的符号，再按 URI 做项目范围过滤：只有能够转换为本地文件路径且位于 canonical workspace root 下的符号才保留。
 
 rust-analyzer 默认的 workspace symbol 只搜索类型。cgraph 会把 `scope=workspace` 与 `kind=all_symbols` 递归合并进 initialization options，同时保留调用方的其他设置；`workspace/configuration` 也返回相同策略。cgraph 不覆盖默认 limit，因为 rust-analyzer 的 128 项默认值就是为“客户端随过滤文本重新查询”的模式设计的。服务端差异必须收敛在 Fetch 层，App/TUI 不应知道 rust-analyzer 的私有查询标记。
 

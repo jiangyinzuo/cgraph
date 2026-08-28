@@ -68,13 +68,13 @@ tl/tr or side button -> one hierarchy task -> result channel -> branch request-i
 r -> incoming + outgoing tasks -> result channel -> independent branch request-id checks
 ```
 
-每个文本变化都会生成包含完整 query 的新 `SearchRequest`。TUI 只保留一个 Tokio task：任务先等待 200 ms，若期间收到新输入就被 abort，因此快速连续输入不会击穿到语言服务器。已经显示的候选会立刻按新文本在本地重新评分，避免防抖期间列表与输入完全脱节。
+每个文本变化都会生成一个新的 `SearchRequest`。请求中的 `query` 只包含输入按空白分隔后的第一项；TUI 只保留一个 Tokio task：任务先等待 200 ms，若期间收到新输入就被 abort，因此快速连续输入不会击穿到语言服务器。已经显示的候选会立刻按完整输入在本地重新筛选，避免防抖期间列表与输入完全脱节。
 
 App 在安排新请求时进入 `Debouncing`，状态行显示 `Waiting for typing pause…`。task 完成 sleep 后先通过结果 channel 发送 `Started(request_id)`，事件循环确认 id 仍是当前请求后才进入 `Loading` 并显示 `Searching workspace symbols…`；随后 task 才调用统一 provider client。完成事件仍携带相同 id，因而开始和结束状态都不能被旧任务污染。
 
 若 task 已经越过防抖并发出了 JSON-RPC 请求，abort 会让请求 future 被丢弃，Fetch 层随后发送 `$/cancelRequest`。request id 在整个 App 生命周期内单调变化，只有当前 id 的结果才会接收；这是为不严格遵守取消的 server 保留的第二道防线。关闭弹窗同样 abort 当前 task。
 
-本地模糊匹配忽略大小写并采用有序子序列语义。单段查询匹配符号名；多段查询会先尝试把完整文本匹配符号名，失败后用第一段匹配符号名、其余部分匹配 container/path。排序优先级为精确匹配、前缀、连续子串、紧凑子序列，同分时按符号名稳定排序。这个二次评分不会替代 server 查询，而是对 provider 返回结果建立稳定的 TUI 顺序。算法故意留在 App 而非渲染代码中，以便无终端单元测试和未来替换 matcher。
+本地模糊匹配由独立的 `app/fuzzy.rs` 适配层调用 `nucleo-matcher`，忽略大小写并采用 Unicode-aware 的有序子序列语义。第一项匹配符号名；多项查询中，后续项匹配 symbol name、container name 与 location 组成的元数据文本。这个二次筛选不会替代 server 查询，而是对 provider 返回结果建立稳定的 TUI 顺序；同分时按符号名和原始顺序稳定排序。算法适配器留在 App 而非渲染代码中，便于无终端单元测试和未来替换 matcher。
 
 ## call/type 结果过滤
 

@@ -74,7 +74,7 @@ parse CLI
 
 ## 为什么第一次 workspace symbol 查询较慢
 
-cgraph 的搜索框采用约 200 ms 防抖。打开弹窗后如果没有继续输入，会发送空字符串 `workspace/symbol`；输入非空文本后则发送当前完整文本。cgraph 为 rust-analyzer 设置 `kind=all_symbols` 和 `scope=workspace`，以便 call 搜索能够找到函数，同时默认排除依赖。
+cgraph 的搜索框采用约 200 ms 防抖。打开弹窗后如果没有继续输入，会发送空字符串 `workspace/symbol`；输入按空白拆分后只把第一项发送给 server，后续项由客户端在候选的名称、容器和路径上模糊筛选。cgraph 为 rust-analyzer 设置 `kind=all_symbols` 和 `scope=workspace`，以便 call 搜索能够找到函数，同时默认排除依赖。
 
 rust-analyzer 对没有 module path 限制的 workspace symbol 查询会取得所有 local roots 中的 crates，并并行建立各 crate/module 的 `SymbolIndex`，随后使用 FST 完成名称匹配。空字符串的模糊子序列自动机会匹配几乎所有名称，因此会遍历大量符号。
 

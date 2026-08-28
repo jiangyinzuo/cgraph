@@ -126,7 +126,7 @@ pager 打开时仍保留最底行快捷键与后端状态。cgraph 暂停 Crosst
 
 | 输入 | 当前行为 |
 | --- | --- |
-| 普通字符 | 编辑查询；约 200 ms 后按完整文本重新查询当前分析 provider |
+| 普通字符 | 编辑查询；约 200 ms 后用第一项重新查询 provider，后续项只在本地模糊筛选 |
 | `Backspace` | 删除一个 Unicode 字符并重新安排查询 |
 | `Up`, `Ctrl-p` | 选择上一项 |
 | `Down`, `Ctrl-n` | 选择下一项 |
@@ -138,11 +138,11 @@ pager 打开时仍保留最底行快捷键与后端状态。cgraph 暂停 Crosst
 
 call 搜索当前保留 function、method 和 constructor；type 搜索保留 class、interface、struct、enum 和 type parameter。LSP 与 Tree-sitter 都映射到同一公共 symbol-kind 分类。
 
-打开 `ac` 或 `at` 弹窗会安排一次空文本查询；输入变化会重置约 200 ms 的防抖计时，然后把当前完整文本交给当前 provider。查询不要求两个字符。LSP 模式下，若前一次请求已经发出，cgraph 会发送 `$/cancelRequest`；无论 provider 是否能停止工作，request id 都会阻止旧结果覆盖当前列表。
+打开 `ac` 或 `at` 弹窗会安排一次空文本查询；输入按空白拆分，第一项在约 200 ms 防抖后交给当前 provider，后续项只用于对已返回候选做本地模糊筛选。查询不要求两个字符。LSP 模式下，若前一次请求已经发出，cgraph 会发送 `$/cancelRequest`；无论 provider 是否能停止工作，request id 都会阻止旧结果覆盖当前列表。
 
 状态行会区分两个阶段：`Waiting for typing pause…` 表示仍在等待 200 ms 防抖，尚未请求 server；`Searching workspace symbols…` 表示当前 `workspace/symbol` 请求已经开始。
 
-LSP 负责按 query 搜索；Tree-sitter 返回项目静态索引候选。cgraph 对候选去重并进行不区分大小写的模糊评分。匹配允许字符按顺序但不连续地出现，排名依次偏好精确匹配、前缀匹配、连续子串和更紧凑的子序列。默认只展示 `--workspace` 根目录内的项目符号，不展示依赖或其他工作区外文件中的符号。
+LSP 负责按第一项 query 搜索；Tree-sitter 返回项目静态索引候选。cgraph 对候选去重，并使用 `nucleo-matcher` 进行 Unicode-aware、不区分大小写的本地模糊筛选：第一项约束 symbol name，后续项匹配 symbol name、container name 与路径。默认只展示 `--workspace` 根目录内的项目符号，不展示依赖或其他工作区外文件中的符号。
 
 ## Save modal 模式
 

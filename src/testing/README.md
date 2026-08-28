@@ -16,11 +16,12 @@
 
 ## 自动化清单
 
-当前共有 **133 个自动化测试**，其中 132 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
+当前共有 **137 个自动化测试**，其中 136 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
 
 <!-- test-inventory
-src/app.rs: 17
+src/app.rs: 19
 src/app/config.rs: 1
+src/app/fuzzy.rs: 2
 src/app/save.rs: 1
 src/cli.rs: 4
 src/config/mod.rs: 4
@@ -42,13 +43,14 @@ src/tui/mod.rs: 30
 src/tui/save.rs: 2
 src/tui/search.rs: 2
 tests/test_documentation.rs: 1
-total: 133
+total: 137
 -->
 
 | 位置 | 数量 | 类型 | 主要覆盖 |
 | --- | ---: | --- | --- |
-| `src/app.rs` | 17 | 状态机单元测试 | 搜索生命周期、项目符号过滤、模糊排序、根管理、hierarchy 加载/缓存/刷新/去重/竞态、Tree-sitter 提示和外部聚焦 |
+| `src/app.rs` | 19 | 状态机单元测试 | 搜索生命周期、第一项 LSP 查询、空查询、本地多项过滤、Unicode 路径匹配、项目符号过滤、模糊排序、根管理、hierarchy 加载/缓存/刷新/去重/竞态、Tree-sitter 提示和外部聚焦 |
 | `src/app/config.rs` | 1 | 配置重载状态机测试 | 全部成功空/已加载/正在刷新分支、新 request id、过滤应用、anchor 保留与迟到结果拒绝 |
+| `src/app/fuzzy.rs` | 2 | 模糊匹配适配器单元测试 | 通过 `nucleo-matcher` 验证 Unicode 子序列和多词元数据匹配 |
 | `src/app/save.rs` | 1 | 保存状态单元测试 | 路径编辑、错误保留与再次编辑恢复 |
 | `src/cli.rs` | 4 | 解析测试 | call 子命令、空画布、LSP 参数位置、IPC socket 路径 |
 | `src/config/mod.rs` | 4 | 配置加载单元测试 | 缺省加载、严格 TOML、统一规则列表、默认项目范围、外部 `printf` 例外、LSP 文件后缀规范化及非法值 |
@@ -98,7 +100,7 @@ Hierarchy 测试重点验证：
 - Tree-sitter 成功结果写入明确的语法级置信度提示，不把静态子集冒充完整语义。
 - 配置重载刷新每个已加载或正在刷新的可达方向，包括成功空分支；新 request id 拒绝编辑期间的旧结果，新过滤器作用于响应且 anchors 保留。
 
-搜索测试使用同样模式验证防抖前状态、请求开始、旧会话结果拒绝和本地模糊排序。
+搜索测试使用同样模式验证防抖前状态、请求开始、旧会话结果拒绝、空输入展示全部候选、第一项作为 LSP 查询以及后续词对容器/路径的本地模糊筛选。`src/app/fuzzy.rs` 单独验证第三方 matcher 的 Unicode 与多词行为。
 
 ### LSP 协议测试
 
