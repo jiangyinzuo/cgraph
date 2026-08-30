@@ -6,19 +6,19 @@
 
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
-    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
+    pattern::{AtomKind, CaseMatching, Normalization},
 };
 
+/// Scores one fuzzy subsequence after discarding query whitespace.
+///
+/// Spaces are only visual separators: `parser thread` is matched as
+/// `parserthread`, not parsed into independent boolean terms.
 pub(super) fn score(query: &str, candidate: &str) -> Option<u32> {
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut buffer = Vec::new();
-    Pattern::new(
-        query,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-    )
-    .score(Utf32Str::new(candidate, &mut buffer), &mut matcher)
+    let compact_query = query
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    atom_score(&compact_query, candidate)
 }
 
 pub(super) fn atom_score(query: &str, candidate: &str) -> Option<u32> {
@@ -47,8 +47,8 @@ mod tests {
     }
 
     #[test]
-    fn matches_all_space_separated_terms_against_candidate_metadata() {
-        assert!(score("run service", "run Service /tmp/service.rs").is_some());
-        assert!(score("run service", "run Controller /tmp/controller.rs").is_none());
+    fn treats_spaces_as_readable_fuzzy_query_separators() {
+        assert!(score("prs thrd", "ParserService::thread_worker").is_some());
+        assert!(score("thrd prs", "ParserService::thread_worker").is_none());
     }
 }

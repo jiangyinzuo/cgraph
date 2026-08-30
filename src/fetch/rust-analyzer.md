@@ -74,7 +74,7 @@ parse CLI
 
 ## 为什么第一次 workspace symbol 查询较慢
 
-cgraph 的搜索框采用约 200 ms 防抖。打开弹窗后如果没有继续输入，会发送空字符串 `workspace/symbol`；输入按空白拆分后只把第一项发送给 server，后续项由客户端在候选的名称、容器和路径上模糊筛选。cgraph 为 rust-analyzer 设置 `kind=all_symbols` 和 `scope=workspace`，以便 call 搜索能够找到函数，同时默认排除依赖。
+cgraph 的搜索框采用约 200 ms 防抖。打开弹窗后如果没有继续输入，会发送空字符串 `workspace/symbol`；编辑 LSP Query 时把该栏完整文本发送给 server，Symbol 和 URI 两栏由客户端分别在完整显示名与 URI/显示路径上模糊筛选。cgraph 为 rust-analyzer 设置 `kind=all_symbols` 和 `scope=workspace`，以便 call 搜索能够找到函数，同时默认排除依赖。
 
 rust-analyzer 对没有 module path 限制的 workspace symbol 查询会取得所有 local roots 中的 crates，并并行建立各 crate/module 的 `SymbolIndex`，随后使用 FST 完成名称匹配。空字符串的模糊子序列自动机会匹配几乎所有名称，因此会遍历大量符号。
 
@@ -90,7 +90,7 @@ rust-analyzer 默认响应上限为 128，但上限是在 `world_symbols` 已经
 
 基础状态展示已经实现：cgraph 声明 work-done progress 和 rust-analyzer server status capability，JSON-RPC actor 归一化 `$/progress` 与 `experimental/serverStatus`，TUI 最底栏右侧可区分 LSP 已连接、后台工作、warning/error 和断开，左侧同时保留快捷键。搜索弹窗仍独立显示单次 `workspace/symbol` 的防抖与请求状态，因此不会再用一次请求的 Loading 推测整个 server 是否就绪。
 
-仍需记录至少四段结构化耗时：进程启动、`initialize`、索引/缓存预热、第一次 `workspace/symbol`。当前 server stderr 被丢弃，也没有持久性能记录，不利于区分 Cargo metadata、build script、proc macro 和符号索引瓶颈。后续应支持显式日志文件，并对敏感路径和 server 输出设置清晰的保留策略。部分 server 不发送 progress，因此 UI 的 `Ready` 只能表示当前没有已知活动任务，不能作为索引完成的强保证。
+当前已经记录初始化后的 server/workspace/bootstrap/log path 摘要；server stderr 默认进入每进程独立的 `/tmp` 文件，空 `workspace/symbol` 结果会记录候选数和请求耗时。仍需进一步拆分进程启动、`initialize`、索引/缓存预热和第一次非空查询的结构化耗时，并增加日志轮转/保留策略。部分 server 不发送 progress，因此 UI 的 `Ready` 只能表示当前没有已知活动任务，不能作为索引完成的强保证。
 
 ### 2. 调整空查询策略
 

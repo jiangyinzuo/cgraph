@@ -24,7 +24,7 @@ workspace_only = true
 rules = ["#*::into", "!#Option::into", "**/generated/**", "!src/generated/keep.rs"]
 ```
 
-`[lsp]` 是可选的项目语言服务器配置。`name` 选择 server profile/语言方言；`command` 是实际可执行文件或路径，`args` 是按原样传递给它的参数列表；不能把整段 shell 命令写进一个字段。`file_extensions` 是 profile 可用于 bootstrap 扫描的项目文件后缀；加载器去掉可选前导点、统一为小写并去重，空数组、空后缀、路径和通配符会报错。省略时由 profile 补默认值：Rust 为 `rs`，clangd 为 `c/cc/cpp/cxx/h/hh/hpp/hxx`，Pyrefly 为 `py/pyi`。`name` 省略时从 command 的 basename 推导，适合 `/usr/bin/clangd` 这类路径；使用包装脚本时应显式填写真实 server name。省略 `[lsp]` 时，主程序按项目标志选择内置 profile：Rust 使用 `rust-analyzer`，C/C++ 使用 `clangd`，Python 使用 `pyrefly lsp`。CLI 的 `--lsp` / `--lsp-arg` 仍可作为一次性显式覆盖，优先级高于项目文件；`--no-lsp` 优先级最高。
+`[lsp]` 是可选的项目语言服务器配置。`name` 选择 server profile/语言方言；`command` 是实际可执行文件或路径，`args` 是按原样传递给它的参数列表；不能把整段 shell 命令写进一个字段。`file_extensions` 是 profile 可用于 bootstrap 扫描的项目文件后缀；加载器去掉可选前导点、统一为小写并去重，空数组、空后缀、路径和通配符会报错。省略时由 profile 补默认值：Rust 为 `rs`，clangd 为 `c/cc/cpp/cxx/h/hh/hpp/hxx`，Pyrefly 为 `py/pyi`。`log_file` 是可选 stderr 路径，相对路径按 workspace 解析。`name` 省略时从 command 的 basename 推导，适合 `/usr/bin/clangd` 这类路径；使用包装脚本时应显式填写真实 server name。省略 `[lsp]` 时，主程序按项目标志选择内置 profile：Rust 使用 `rust-analyzer`，C/C++ 使用 `clangd --background-index`，Python 使用 `pyrefly lsp`，日志默认位于 `/tmp`。CLI 的 `--lsp` / `--lsp-arg` / `--lsp-log` 仍可作为一次性显式覆盖，优先级高于项目文件；`--no-lsp` 优先级最高。
 
 配置命令的示例：
 
@@ -33,6 +33,7 @@ rules = ["#*::into", "!#Option::into", "**/generated/**", "!src/generated/keep.r
 command = "clangd"
 args = ["--background-index"]
 file_extensions = ["c", "cpp", "h", "hpp"]
+log_file = "logs/clangd.log"
 ```
 
 Pyrefly 仍只需填写 `command = "pyrefly"`，cgraph 会自动在参数最前面加入其标准 `lsp` 子命令；其他 server 不会被添加私有参数。配置文件通过 `ec` 修改后，过滤规则和项目范围会在当前会话刷新；LSP 可执行文件、参数或文件后缀的修改将在下一次启动 cgraph 时生效，避免在 TUI 中无序替换正在服务的 JSON-RPC 进程。

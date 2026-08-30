@@ -3,8 +3,8 @@ use super::{SearchItem, SearchState};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct SearchScore {
-    symbol: u32,
-    trailing: Option<u32>,
+    symbol: Option<u32>,
+    uri: Option<u32>,
 }
 
 pub(super) fn refresh_search_items(search: &mut SearchState) {
@@ -12,7 +12,9 @@ pub(super) fn refresh_search_items(search: &mut SearchState) {
         .candidates
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| search_score(&search.input, item).map(|score| (index, score)))
+        .filter_map(|(index, item)| {
+            search_score(&search.symbol_query, &search.uri_query, item).map(|score| (index, score))
+        })
         .collect::<Vec<_>>();
     matches.sort_by(|left, right| {
         right
@@ -34,24 +36,29 @@ pub(super) fn refresh_search_items(search: &mut SearchState) {
     search.selected = (!search.items.is_empty()).then_some(0);
 }
 
-fn search_score(query: &str, item: &SearchItem) -> Option<SearchScore> {
-    let mut parts = query.split_whitespace();
-    let Some(symbol_query) = parts.next() else {
-        return Some(SearchScore {
-            symbol: 0,
-            trailing: None,
-        });
-    };
-    let symbol = fuzzy::atom_score(symbol_query, &item.name)?;
-    let trailing_query = parts.collect::<Vec<_>>().join(" ");
-    let trailing = if trailing_query.is_empty() {
-        None
+fn search_score(symbol_query: &str, uri_query: &str, item: &SearchItem) -> Option<SearchScore> {
+    Some(SearchScore {
+        symbol: optional_score(symbol_query, &item.name)?,
+        uri: optional_uri_score(uri_query, item)?,
+    })
+}
+
+fn optional_score(query: &str, candidate: &str) -> Option<Option<u32>> {
+    if query.split_whitespace().next().is_none() {
+        Some(None)
     } else {
-        let searchable = item.container_name.as_deref().map_or_else(
-            || format!("{} {}", item.name, item.location),
-            |container| format!("{} {container} {}", item.name, item.location),
-        );
-        Some(fuzzy::score(&trailing_query, &searchable)?)
-    };
-    Some(SearchScore { symbol, trailing })
+        fuzzy::score(query, candidate).map(Some)
+    }
+}
+
+fn optional_uri_score(query: &str, item: &SearchItem) -> Option<Option<u32>> {
+    if query.split_whitespace().next().is_none() {
+        return Some(None);
+    }
+    let location_score = fuzzy::score(query, &item.location);
+    let source_score = item
+        .source
+        .as_ref()
+        .and_then(|source| fuzzy::score(query, &source.uri));
+    location_score.max(source_score).map(Some)
 }

@@ -40,7 +40,7 @@
 | 父需求 | 状态 | 优先级 | 子需求 | 摘要 |
 | --- | --- | --- | ---: | --- |
 | [REQ-1 会话与启动](REQ-1-session/README.md) | `Implemented` | `P0` | 2 | 启动模式、初始图入口和安全退出 |
-| [REQ-2 分析后端状态](REQ-2-analysis-status/README.md) | `Implemented` | `P0` | 3 | LSP/Tree-sitter 状态及底部同栏展示 |
+| [REQ-2 分析后端状态](REQ-2-analysis-status/README.md) | `Implemented` | `P0` | 4 | LSP/Tree-sitter 状态、诊断日志及底部同栏展示 |
 | [REQ-3 层次关系探索](REQ-3-hierarchy/README.md) | `Implemented` | `P1` | 4 | 双向展开、缓存、重复节点和刷新 |
 | [REQ-4 画布与导航](REQ-4-canvas-navigation/README.md) | `Implemented` | `P1` | 5 | 选中、空间导航、无限画布、图布局、连线与操作帮助 |
 | [REQ-5 符号与图入口管理](REQ-5-symbol-management/README.md) | `Implemented` | `P0` | 5 | 搜索、新增、重定位与取消图入口 |

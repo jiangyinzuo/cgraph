@@ -357,6 +357,13 @@ fn schedule_hierarchy(
 }
 
 fn apply_lsp_status(app: &mut App, update: LspStatusUpdate) {
+    let update = match update {
+        LspStatusUpdate::Diagnostic(message) => {
+            app.set_canvas_notice(message);
+            return;
+        }
+        update => update,
+    };
     let server = match &app.analysis_status.backend {
         AnalysisBackend::Lsp(server) => server.clone(),
         _ => "LSP".to_owned(),
@@ -399,6 +406,7 @@ fn apply_lsp_status(app: &mut App, update: LspStatusUpdate) {
             message: Some(message),
             percentage: None,
         },
+        LspStatusUpdate::Diagnostic(_) => unreachable!("diagnostics return before status mapping"),
     };
     app.set_analysis_status(status);
 }
@@ -1150,6 +1158,32 @@ mod tests {
             Some("Roots Scanned: 68/251")
         );
         assert_eq!(app.analysis_status.percentage, Some(100));
+    }
+
+    #[test]
+    fn records_lsp_diagnostics_without_changing_connection_status() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        app.set_analysis_status(crate::app::AnalysisStatus::lsp(
+            "clangd",
+            AnalysisPhase::Ready,
+        ));
+
+        apply_lsp_status(
+            &mut app,
+            LspStatusUpdate::Diagnostic(
+                "workspace/symbol(\"main\") returned 0 candidates".to_owned(),
+            ),
+        );
+
+        assert_eq!(app.analysis_status.phase, AnalysisPhase::Ready);
+        assert_eq!(
+            app.canvas_notice.as_deref(),
+            Some("workspace/symbol(\"main\") returned 0 candidates")
+        );
+        assert_eq!(
+            app.message_history,
+            ["workspace/symbol(\"main\") returned 0 candidates"]
+        );
     }
 
     #[test]

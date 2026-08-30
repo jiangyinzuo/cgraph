@@ -46,6 +46,8 @@ pub struct LspSettings {
     pub command: String,
     pub args: Vec<String>,
     pub file_extensions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_file: Option<PathBuf>,
 }
 
 impl LspSettings {
@@ -55,6 +57,7 @@ impl LspSettings {
             command: String::new(),
             args: Vec::new(),
             file_extensions: None,
+            log_file: None,
         }
     }
 
@@ -96,6 +99,7 @@ impl Default for LspSettings {
             command: "rust-analyzer".to_owned(),
             args: Vec::new(),
             file_extensions: Some(vec!["rs".to_owned()]),
+            log_file: None,
         }
     }
 }
@@ -123,7 +127,7 @@ fn project_config_template() -> String {
         .map(|line| format!("# {line}\n"))
         .collect::<String>();
     format!(
-        "# Optional language-server command.\n# When omitted, cgraph selects rust-analyzer, clangd or pyrefly by project markers.\n#[lsp]\n# name identifies the server profile; command is the executable to run.\n{commented_lsp}[filters]\n# Rules are ordered; prefix symbol rules with # and re-include with !.\nworkspace_only = true\nrules = []\n"
+        "# Optional language-server command.\n# When omitted, cgraph selects rust-analyzer, clangd or pyrefly by project markers.\n#[lsp]\n# name identifies the server profile; command is the executable to run.\n{commented_lsp}# log_file = \"logs/lsp.log\"\n[filters]\n# Rules are ordered; prefix symbol rules with # and re-include with !.\nworkspace_only = true\nrules = []\n"
     )
 }
 
@@ -250,10 +254,11 @@ mod tests {
         let template = fs::read_to_string(&path).unwrap();
         assert!(template.contains("# name = \"rust-analyzer\""));
         assert!(template.contains("# file_extensions = [\"rs\"]"));
+        assert!(template.contains("# log_file = \"logs/lsp.log\""));
         assert!(template.contains("rules = []"));
         fs::write(
             &path,
-            "[lsp]\nname = \" rust-analyzer \"\ncommand = \" /usr/bin/rust-analyzer \"\nargs = [\"--log-file=/tmp/ra.log\"]\nfile_extensions = [\".RS\", \" rs \", \"RS\"]\n\n[filters]\nworkspace_only = false\nrules = [\"#*::into\", \"#Option::is_some\", \"#*::Some\"]\n",
+            "[lsp]\nname = \" rust-analyzer \"\ncommand = \" /usr/bin/rust-analyzer \"\nargs = [\"--log-file=/tmp/ra.log\"]\nfile_extensions = [\".RS\", \" rs \", \"RS\"]\nlog_file = \"logs/rust-analyzer.log\"\n\n[filters]\nworkspace_only = false\nrules = [\"#*::into\", \"#Option::is_some\", \"#*::Some\"]\n",
         )
         .unwrap();
         ProjectConfig::create_if_missing(&workspace).unwrap();
@@ -269,6 +274,7 @@ mod tests {
                 command: "/usr/bin/rust-analyzer".to_owned(),
                 args: vec!["--log-file=/tmp/ra.log".to_owned()],
                 file_extensions: Some(vec!["rs".to_owned()]),
+                log_file: Some(PathBuf::from("logs/rust-analyzer.log")),
             })
         );
         fs::write(

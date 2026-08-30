@@ -24,10 +24,10 @@ cgraph --lsp pyrefly --workspace /path/to/project
 [lsp]
 name = "clangd"
 command = "/usr/bin/clangd"
-args = ["--background-index"]
+args = []
 ```
 
-cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状态栏和搜索框中。当前 server stderr 为了避免破坏 TUI 备用屏幕而被丢弃；更详细的日志输出仍是待实现功能。需要绕过损坏或缺失的 LSP 时，可以使用 `--no-lsp` 强制尝试 Tree-sitter 回退。
+cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状态栏和搜索框中。LSP 初始化摘要会记录 server 版本、workspace、bootstrap 文档和 stderr 日志路径，按 `g<` 查看。server stderr 默认保存在 `/tmp/cgraph-<server>-<pid>.log`；也可用 `--lsp-log /path/to/file` 或 `[lsp].log_file` 覆盖。需要绕过损坏或缺失的 LSP 时，可以使用 `--no-lsp` 强制尝试 Tree-sitter 回退。
 
 ## 搜索一直为空
 
@@ -46,10 +46,26 @@ cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状�
 - Pyrefly 当前要求 workspace-symbol query 至少包含 3 个字符；更短输入会由 server 返回空结果。
 - Tree-sitter 会跳过隐藏目录、`target`、`node_modules` 和符号链接；这些位置中的符号不会进入静态索引。
 
+空结果会额外进入 `g<` 消息历史，例如 `workspace/symbol("main") returned 0 candidate(s), 0 after project filters in 4 ms`。前一个数字为 server 返回并完成协议归一化后的数量；它已经为零时优先检查索引和编译数据库。若前一个数字非零而过滤后为零，则检查 workspace 根与 `[filters]`。clangd 日志中可搜索 `Loaded compilation database`、`Enqueueing ... commands for indexing`、`workspace/symbol`、`error` 和 `failed`。
+
 使用独立示例区分 TUI 过滤和 server 原始结果：
 
 ```bash
 cargo run --example lsp_workspace_symbols -- rust-analyzer QueryText /path/to/project
+```
+
+搜索框还可以临时按文件缩小候选：在 LSP Query 输入 `main`，按两次 `Tab` 切到 URI 后输入 `parser cpp`。后者只在本地匹配候选 URI/显示路径；若过滤后为空，先清空 URI 栏确认 server 是否返回了同名符号。
+
+## clangd 搜索多个 `main` 只返回一个
+
+在包含多个 executable target 的大型 C/C++ 仓库中，文本搜索可能找到许多全局 `main` 定义，而 clangd 的标准 `workspace/symbol` 只返回一个。clangd 的全局索引按 SymbolID（通常由 USR 派生）合并符号；多个 target 中同签名的全局定义可能成为一个索引符号，并只保留一个代表位置。这不是 cgraph 按名称去重，也通常不是 `.cgraph.toml` 的过滤规则造成的。
+
+cgraph 会保留 server 返回的、URI 或 range 不同的同名项，只删除协议字段完全相同的重复项。它不会把 Tree-sitter 搜索结果聚合进 LSP 候选，因为混合两个完整性语义不同的 provider 会掩盖 clangd 的真实响应。标准 LSP 没有 workspace 范围枚举所有 definition occurrence 的请求，因此 Symbol/URI 本地筛选也只能缩小 clangd 已返回的集合，不能恢复被索引合并的位置。
+
+可用独立示例直接确认 clangd 的原始结果，并检查 `/tmp/cgraph-clangd-<pid>.log` 中的索引与请求记录。若必须枚举源码中的每一个 `main` 定义，当前应使用文本搜索或专门的代码索引工具；cgraph 暂不把这类语法扫描结果冒充为 LSP workspace symbols。
+
+```bash
+cargo run --example lsp_workspace_symbols -- clangd main /path/to/project
 ```
 
 ## 展开按钮显示 `[!]`
@@ -72,7 +88,7 @@ cargo run --example lsp_hierarchy -- rust-analyzer call outgoing main /path/to/p
 
 - 可以继续输入 `ac` / `at` 发起查询，但索引未完成时结果可能暂时不完整。
 - `Ready` 只表示当前没有已知活动任务；不发送进度通知的 server 可能在后台工作但仍显示 Ready。
-- `Warning` 或 `Error` 时先阅读状态后附带的消息；终端过窄时消息可能截断，可以扩大终端。目前 server stderr 尚未接入，请同时保留 server 版本和启动参数。
+- `Warning` 或 `Error` 时先阅读状态后附带的消息；终端过窄时按 `g<` 查看完整历史，并检查初始化摘要给出的 `/tmp` stderr 日志。
 - `Disconnected` 表示 LSP 通道已经结束。当前版本不会自动重启 server；退出后重新运行 cgraph，并用显式 `--lsp` 检查是否可复现。
 - `Tree-sitter: <language> · Ready` 表示 grammar 和 tags query 已初始化；第一次搜索或展开会惰性建立项目静态索引。展开后的 `syntactic relations only` 提示表示动态、歧义或项目外关系可能省略。
 - `Backend: none · Inactive` 表示没有 LSP，且工作区未检测到 Rust、C、C++ 或 Python 的 Tree-sitter 标志。
@@ -90,7 +106,7 @@ cargo run --example lsp_hierarchy -- rust-analyzer call outgoing main /path/to/p
 以 `-` 开头的参数使用：
 
 ```bash
-cgraph --lsp clangd --lsp-arg=--background-index
+cgraph --lsp clangd --lsp-arg=--log=verbose
 ```
 
 多个参数重复写 `--lsp-arg`，不要把完整 shell 命令放进 `--lsp`。

@@ -10,11 +10,12 @@ cgraph 会读取 `--workspace` 根目录中的 `.cgraph.toml`。该文件适合�
 [lsp]
 name = "clangd"
 command = "clangd"
-args = ["--background-index"]
+args = []
 file_extensions = ["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]
+log_file = "logs/clangd.log"
 ```
 
-`name` 指定内置 server profile/语言方言，`command` 表示实际可执行文件或路径；例如包装脚本可以使用 `name = "clangd"`。`args` 中每个元素作为一个独立参数传递，不进行 shell 解析。`file_extensions` 控制 profile 查找可用于启动索引的项目文档；每项只写不带路径和通配符的后缀。加载时会去掉可选前导 `.`、转成小写并去重。省略该字段时使用 profile 默认值：Rust 为 `rs`，clangd 为 `c/cc/cpp/cxx/h/hh/hpp/hxx`，Pyrefly 为 `py/pyi`；显式空数组是配置错误。自定义语言服务器应显式声明自己的后缀。省略 `[lsp]` 时，cgraph 使用内置默认 profile：Rust 为 `rust-analyzer`，C/C++ 为 `clangd`，Python 为 `pyrefly lsp`。CLI 的 `--lsp` 与 `--lsp-arg` 是一次性覆盖，优先于项目配置；`--no-lsp` 会完全禁用 LSP。通过 `ec` 修改命令后，过滤配置会在当前会话刷新，但新的 LSP 命令、参数和文件扩展名在下一次启动时生效。
+`name` 指定内置 server profile/语言方言，`command` 表示实际可执行文件或路径；例如包装脚本可以使用 `name = "clangd"`。`args` 中每个元素作为一个独立参数传递，不进行 shell 解析。内置 clangd profile 已默认添加 `--background-index`，无需在项目中重复配置；显式 `--no-background-index` 会覆盖默认策略。`file_extensions` 控制 profile 查找可用于启动索引的项目文档；每项只写不带路径和通配符的后缀。加载时会去掉可选前导 `.`、转成小写并去重。省略该字段时使用 profile 默认值：Rust 为 `rs`，clangd 为 `c/cc/cpp/cxx/h/hh/hpp/hxx`，Pyrefly 为 `py/pyi`；显式空数组是配置错误。自定义语言服务器应显式声明自己的后缀。`log_file` 保存 LSP stderr；相对路径按 workspace 解析，父目录必须已经存在。省略时使用 `/tmp/cgraph-<server>-<pid>.log`。省略 `[lsp]` 时，cgraph 使用内置默认 profile：Rust 为 `rust-analyzer`，C/C++ 为 `clangd --background-index`，Python 为 `pyrefly lsp`。CLI 的 `--lsp`、`--lsp-arg` 与 `--lsp-log` 是一次性覆盖，优先于项目配置；`--no-lsp` 会完全禁用 LSP。通过 `ec` 修改命令后，过滤配置会在当前会话刷新，但新的 LSP 命令、参数、日志路径和文件扩展名在下一次启动时生效。
 
 ## 过滤符号
 
@@ -68,6 +69,7 @@ Canvas 模式输入 `ec` 会离开备用屏幕，并用 `$EDITER` 打开当前 w
 # command = "rust-analyzer"
 # args = []
 # file_extensions = ["rs"]
+# log_file = "logs/rust-analyzer.log"
 
 [filters]
 # Keep discovered symbols inside the project root.

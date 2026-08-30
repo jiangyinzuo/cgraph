@@ -11,12 +11,14 @@ TUI 层把终端事件转换为 App 状态迁移，并把 App 渲染为 Ratatui 
 事件处理分为两个模式：
 
 - Canvas 模式：`a` 后接 `c` / `t` 打开 call/type 搜索框；`t` 后接 `l` / `r` 独立 toggle；`e` 后接 `c` 编辑并重载配置；裸 `r` 刷新当前节点；`w` 保存；`?` 打开帮助；`dd` / `dp` / `dn` 管理入口和分支；`q` 或 `Esc` 退出。
-- Search modal 模式：普通字符编辑查询，方向键或 `Ctrl-n` / `Ctrl-p` 选择，回车确认，`Esc` 关闭。
+- Search modal 模式：普通字符编辑当前 LSP Query、Symbol 或 URI 输入框，`Tab` 循环焦点，方向键或 `Ctrl-n` / `Ctrl-p` 选择，回车确认，`Esc` 关闭。
 - Save modal 模式：普通字符和 Backspace 编辑路径，回车尝试安全创建目标，`Esc` 关闭；写入失败保留弹窗和错误，成功后关闭并把路径写入统一消息历史。
 - Help modal 模式：方向键、`j`/`k`、PageUp/PageDown、Home/End 或鼠标滚轮查看完整清单；`?`、`q`、`Esc` 只关闭帮助。帮助事件优先于 Canvas 分发，防止低层命令透传。
 - Message pager 模式：最新信息或错误显示在倒数第二行；按 `g<` 从该行向上打开最多 15 行的 pager，支持滚动、`V` 行选择、`y` OSC 52 复制，`q`/`Esc` 关闭，最底行 footer 始终保留。
 
 鼠标移动用于更新高亮，左键确认，滚轮移动选择。鼠标命中必须使用与渲染相同的 layout 函数，否则终端 resize 后视觉位置和点击位置会不一致。
+
+搜索框的三个纵向输入块各高三行，但相邻块重叠一行并共享横边界，因此总高度为七行而不是九行。渲染先画非活动块，再最后画活动块；这样共享边只出现一次，同时活动块的上下边都保持高亮。超小终端中的重叠区域会先裁剪到 modal 内部，不生成越界矩形。
 
 ## 底部分析状态栏
 
@@ -37,7 +39,7 @@ footer 固定为最底部一行，快捷键提示后紧接分隔符和 `backend 
 
 ## Message pager
 
-消息 pager 位于 `messages.rs`。普通信息、后端状态错误、workspace symbol 错误和 hierarchy 错误都先由 App 记录到统一历史；pager 只维护原始文本、垂直 offset、换行后的总行数、viewport 高度和可选行选择，不包含插入模式、编辑历史、寄存器或宏录制状态。渲染直接组合 Ratatui `Paragraph`、`Scrollbar`、`Block` 和 `Clear`，因此不会修改消息历史或工作区文件，也不依赖完整文本编辑器组件。
+消息 pager 位于 `messages.rs`。普通信息、LSP 初始化诊断、空 workspace-symbol 查询统计、后端状态错误和 hierarchy 错误都先由 App 记录到统一历史；pager 只维护原始文本、垂直 offset、换行后的总行数、viewport 高度和可选行选择，不包含插入模式、编辑历史、寄存器或宏录制状态。诊断事件不覆盖 Ready/Working/Error 状态，server stderr 写入初始化摘要所示的 `/tmp` 文件而不灌入终端。渲染直接组合 Ratatui `Paragraph`、`Scrollbar`、`Block` 和 `Clear`，因此不会修改消息历史或工作区文件，也不依赖完整文本编辑器组件。
 
 文本按 Unicode 显示宽度硬换行，offset 对换行后的屏幕行生效；打开时定位到最新消息，用户向上浏览后保持当前位置，回到底部后继续跟随新增消息。`j/k` 与方向键移动一行，`Space/f/b/PageUp/PageDown` 移动一页，`Ctrl-d/u` 移动半页，`g/G/Home/End` 跳转首尾。`V` 从当前活动屏幕行开始或取消 line selection，移动键扩展选择，`y` 按原始 source byte range 复制，软换行不会被错误写成真实换行；输出使用 Crossterm OSC 52。pager 的区域永远止于最底行之上，因此 footer 在打开期间仍可见。
 
@@ -68,13 +70,13 @@ tl/tr or side button -> one hierarchy task -> result channel -> branch request-i
 r -> incoming + outgoing tasks -> result channel -> independent branch request-id checks
 ```
 
-每个文本变化都会生成一个新的 `SearchRequest`。请求中的 `query` 只包含输入按空白分隔后的第一项；TUI 只保留一个 Tokio task：任务先等待 200 ms，若期间收到新输入就被 abort，因此快速连续输入不会击穿到语言服务器。已经显示的候选会立刻按完整输入在本地重新筛选，避免防抖期间列表与输入完全脱节。
+打开搜索或编辑 LSP Query 会生成新的 `SearchRequest`，其中 `query` 是该输入框的完整文本。TUI 只保留一个 Tokio task：任务先等待 200 ms，若期间继续编辑 LSP Query 就被 abort，因此快速连续输入不会击穿到语言服务器。编辑 Symbol 或 URI 只立即重筛 App 中已经显示的候选，不生成 request，也不会取消仍在运行的 LSP task；响应到达后使用当时最新的本地条件。
 
 App 在安排新请求时进入 `Debouncing`，状态行显示 `Waiting for typing pause…`。task 完成 sleep 后先通过结果 channel 发送 `Started(request_id)`，事件循环确认 id 仍是当前请求后才进入 `Loading` 并显示 `Searching workspace symbols…`；随后 task 才调用统一 provider client。完成事件仍携带相同 id，因而开始和结束状态都不能被旧任务污染。
 
 若 task 已经越过防抖并发出了 JSON-RPC 请求，abort 会让请求 future 被丢弃，Fetch 层随后发送 `$/cancelRequest`。request id 在整个 App 生命周期内单调变化，只有当前 id 的结果才会接收；这是为不严格遵守取消的 server 保留的第二道防线。关闭弹窗同样 abort 当前 task。
 
-本地模糊匹配由独立的 `app/fuzzy.rs` 适配层调用 `nucleo-matcher`，忽略大小写并采用 Unicode-aware 的有序子序列语义。第一项匹配符号名；多项查询中，后续项匹配 symbol name、container name 与 location 组成的元数据文本。这个二次筛选不会替代 server 查询，而是对 provider 返回结果建立稳定的 TUI 顺序；同分时按符号名和原始顺序稳定排序。算法适配器留在 App 而非渲染代码中，便于无终端单元测试和未来替换 matcher。
+本地模糊匹配由独立的 `app/fuzzy.rs` 适配层调用 `nucleo-matcher`，忽略大小写并采用 Unicode-aware 的有序子序列语义。Symbol 只匹配完整 display name，URI 只匹配 URI/显示路径；输入中的空白在交给 matcher 前移除，因此一栏始终是一个普通模糊序列，不解析 AND/OR。这个二次筛选不会替代 server 查询，而是对 provider 返回结果建立稳定的 TUI 顺序；同分时按符号名和原始顺序稳定排序。算法适配器留在 App 而非渲染代码中，便于无终端单元测试和未来替换 matcher。
 
 ## call/type 结果过滤
 

@@ -14,18 +14,21 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
     fmt, fs,
+    fs::OpenOptions,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::{Child, Command},
@@ -63,7 +66,7 @@ use normalize::{
     normalize_symbols, symbol_kind_matches_hierarchy, symbol_leaf_name, type_item_identity,
 };
 use profile::{
-    ServerProfile, ensure_pyrefly_subcommand, file_extensions,
+    ServerProfile, append_configured_args, apply_default_args, file_extensions,
     from_name as server_profile_from_name, from_program as server_profile_from_program,
 };
 use progress::{LspProgressTracker, handle_server_notification};
@@ -104,6 +107,7 @@ pub struct LspConfig {
     pub filters: FilterConfig,
     pub server_name: Option<String>,
     pub file_extensions: Vec<String>,
+    pub stderr_log: Option<PathBuf>,
 }
 
 impl LspConfig {
@@ -118,6 +122,7 @@ impl LspConfig {
             filters: FilterConfig::default(),
             server_name: None,
             file_extensions: Vec::new(),
+            stderr_log: None,
         }
     }
 
@@ -133,12 +138,16 @@ impl LspConfig {
             .iter()
             .map(|extension| (*extension).to_owned())
             .collect();
-        ensure_pyrefly_subcommand(&mut config.args, server_profile_from_program(&program));
+        apply_default_args(&mut config.args, server_profile_from_program(&program));
         config
     }
 
     pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
-        self.args.push(arg.into());
+        let profile = self.server_name.as_deref().map_or_else(
+            || server_profile_from_program(&self.program),
+            server_profile_from_name,
+        );
+        append_configured_args(&mut self.args, [arg.into()], profile);
         self
     }
 
@@ -147,7 +156,11 @@ impl LspConfig {
         I: IntoIterator<Item = S>,
         S: Into<OsString>,
     {
-        self.args.extend(args.into_iter().map(Into::into));
+        let profile = self.server_name.as_deref().map_or_else(
+            || server_profile_from_program(&self.program),
+            server_profile_from_name,
+        );
+        append_configured_args(&mut self.args, args.into_iter().map(Into::into), profile);
         self
     }
 
@@ -176,12 +189,17 @@ impl LspConfig {
 
     pub fn server_name(mut self, server_name: impl Into<String>) -> Self {
         let server_name = server_name.into();
-        ensure_pyrefly_subcommand(&mut self.args, server_profile_from_name(&server_name));
+        apply_default_args(&mut self.args, server_profile_from_name(&server_name));
         self.file_extensions = file_extensions(&server_name)
             .iter()
             .map(|extension| (*extension).to_owned())
             .collect();
         self.server_name = Some(server_name);
+        self
+    }
+
+    pub fn stderr_log(mut self, path: impl Into<PathBuf>) -> Self {
+        self.stderr_log = Some(path.into());
         self
     }
 
@@ -213,6 +231,7 @@ pub enum LspStatusUpdate {
     Warning(String),
     Error(String),
     Disconnected(String),
+    Diagnostic(String),
 }
 
 #[derive(Clone)]
@@ -235,6 +254,7 @@ impl fmt::Debug for WorkspaceSymbolClient {
 
 impl WorkspaceSymbolClient {
     pub async fn query(&self, query: &str) -> Result<Vec<WorkspaceSymbolMatch>> {
+        let started = Instant::now();
         let params = WorkspaceSymbolParams {
             query: query.to_owned(),
             ..WorkspaceSymbolParams::default()
@@ -248,14 +268,22 @@ impl WorkspaceSymbolClient {
         let symbols = response
             .map(|response| normalize_symbols(response, self.symbol_names))
             .unwrap_or_default();
-        Ok(deduplicate_symbols(symbols.into_iter().filter(|symbol| {
+        let received = symbols.len();
+        let visible = deduplicate_symbols(symbols.into_iter().filter(|symbol| {
             symbol_uri_is_visible(
                 &symbol.name,
                 &symbol.uri,
                 &self.workspace_root,
                 &self.filters,
             )
-        })))
+        }));
+        if visible.is_empty() {
+            self.client.report_diagnostic(format!(
+                "workspace/symbol({query:?}) returned {received} candidate(s), 0 after project filters in {} ms; the server may still be indexing",
+                started.elapsed().as_millis()
+            ));
+        }
+        Ok(visible)
     }
 
     pub fn set_workspace_only(&mut self, workspace_only: bool) {
@@ -695,6 +723,25 @@ impl LspProvider {
             )
         })?;
         let workspace_name = workspace_name(&workspace_root);
+        let stderr_log = config.stderr_log.as_ref().map(|path| {
+            if path.is_absolute() {
+                path.clone()
+            } else {
+                workspace_root.join(path)
+            }
+        });
+        let stderr = match stderr_log.as_ref() {
+            Some(path) => {
+                let mut options = OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                Stdio::from(options.open(path).with_context(|| {
+                    format!("failed to open language-server log {}", path.display())
+                })?)
+            }
+            None => Stdio::null(),
+        };
 
         let mut command = Command::new(&config.program);
         command
@@ -702,7 +749,7 @@ impl LspProvider {
             .current_dir(&workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .kill_on_drop(true);
 
         let mut child = command.spawn().with_context(|| {
@@ -771,7 +818,7 @@ impl LspProvider {
             .map(|info| info.name.as_str());
         let detected_server_name = config.server_name.as_deref().or(advertised_server_name);
         let symbol_names = SymbolNameAdapter::detect(&config.program, detected_server_name);
-        let _bootstrap_document = if symbol_names.is_pyrefly() {
+        let bootstrap_document = if symbol_names.is_pyrefly() {
             match pyrefly::bootstrap_document(&workspace_root, &config.file_extensions) {
                 Some(document) => {
                     client
@@ -826,6 +873,23 @@ impl LspProvider {
         } else {
             None
         };
+        let server_label = initialize_result.server_info.as_ref().map_or_else(
+            || config.program.to_string_lossy().into_owned(),
+            |info| match info.version.as_deref() {
+                Some(version) => format!("{} {version}", info.name),
+                None => info.name.clone(),
+            },
+        );
+        let bootstrap = bootstrap_document
+            .as_ref()
+            .map_or_else(|| "none".to_owned(), ToString::to_string);
+        let stderr = stderr_log
+            .as_ref()
+            .map_or_else(|| "disabled".to_owned(), |path| path.display().to_string());
+        client.report_diagnostic(format!(
+            "LSP initialized: {server_label}; workspace={}; bootstrap={bootstrap}; stderr_log={stderr}",
+            workspace_root.display()
+        ));
         Ok(Self {
             child,
             client,
@@ -951,6 +1015,7 @@ fn uses_utf16_positions(position_encoding: Option<&PositionEncodingKind>) -> boo
 struct JsonRpcClient {
     commands: mpsc::Sender<JsonRpcCommand>,
     cancellations: mpsc::UnboundedSender<u64>,
+    status_updates: mpsc::UnboundedSender<LspStatusUpdate>,
     opened_documents: Arc<Mutex<HashSet<Url>>>,
     auto_open_documents: Arc<AtomicBool>,
 }
@@ -992,6 +1057,12 @@ impl Drop for RequestCancellationGuard {
 }
 
 impl JsonRpcClient {
+    fn report_diagnostic(&self, message: impl Into<String>) {
+        let _ = self
+            .status_updates
+            .send(LspStatusUpdate::Diagnostic(message.into()));
+    }
+
     async fn request<P, T>(&self, method: &str, params: P) -> Result<T>
     where
         P: Serialize,
@@ -1151,13 +1222,14 @@ where
         workspace_name,
         hierarchy_capabilities: actor_hierarchy_capabilities,
     };
+    let actor_status_sender = status_sender.clone();
     let connection_task = tokio::spawn(async move {
         let result = run_json_rpc(
             writer,
             command_receiver,
             cancellation_receiver,
             incoming_receiver,
-            status_sender,
+            actor_status_sender,
             server_context,
         )
         .await;
@@ -1169,6 +1241,7 @@ where
     let client = JsonRpcClient {
         commands: command_sender,
         cancellations: cancellation_sender,
+        status_updates: status_sender,
         opened_documents,
         auto_open_documents: Arc::new(AtomicBool::new(false)),
     };
@@ -1632,10 +1705,11 @@ mod tests {
     use super::symbol_names::SymbolNameAdapter;
     use super::{
         HierarchyClient, LspConfig, LspProgressTracker, LspProvider, LspStatusUpdate,
-        WorkspaceSymbolMatch, client_capabilities, deduplicate_symbols, handle_server_notification,
-        normalize_symbols, read_message, requested_configuration, response_id, spawn_json_rpc,
-        symbol_belongs_to_workspace, symbol_leaf_name, uses_utf16_positions,
-        workspace_symbol_initialization_options, workspace_symbol_is_visible, write_message,
+        WorkspaceSymbolClient, WorkspaceSymbolMatch, client_capabilities, deduplicate_symbols,
+        handle_server_notification, normalize_symbols, read_message, requested_configuration,
+        response_id, spawn_json_rpc, symbol_belongs_to_workspace, symbol_leaf_name,
+        uses_utf16_positions, workspace_symbol_initialization_options, workspace_symbol_is_visible,
+        write_message,
     };
     use crate::fetch::treesitter::{TreeSitterLanguage, TreeSitterProvider};
     use crate::{
@@ -1742,6 +1816,10 @@ mod tests {
             LspConfig::for_server("/usr/bin/clangd", "/workspace").file_extensions,
             ["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]
         );
+        assert_eq!(
+            LspConfig::for_server("/usr/bin/clangd", "/workspace").args,
+            [std::ffi::OsString::from("--background-index")]
+        );
     }
 
     #[test]
@@ -1791,6 +1869,53 @@ mod tests {
             deduplicate_symbols([duplicate.clone(), duplicate.clone(), duplicate]),
             vec![symbol("file:///workspace/src/main.rs")]
         );
+    }
+
+    #[tokio::test]
+    async fn reports_empty_workspace_symbol_query_diagnostics() {
+        let (client_stream, server_stream) = duplex(8 * 1024);
+        let (client_reader, client_writer) = split(client_stream);
+        let (server_reader, mut server_writer) = split(server_stream);
+        let workspace_uri = Url::parse("file:///workspace").unwrap();
+        let (rpc_client, mut status_receiver, connection_task, _capabilities) = spawn_json_rpc(
+            BufReader::new(client_reader),
+            client_writer,
+            workspace_uri,
+            "workspace".to_owned(),
+        );
+        let client = WorkspaceSymbolClient {
+            client: rpc_client.clone(),
+            workspace_root: PathBuf::from("/workspace"),
+            symbol_names: SymbolNameAdapter::Standard,
+            workspace_only: true,
+            path_filter: PathFilter::default(),
+            filters: FilterConfig::default(),
+        };
+        let query = tokio::spawn(async move { client.query("missing").await.unwrap() });
+        let mut server_reader = BufReader::new(server_reader);
+        let request = read_message(&mut server_reader).await.unwrap();
+        write_message(
+            &mut server_writer,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": response_id(&request).unwrap(),
+                "result": []
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(query.await.unwrap().is_empty());
+        let diagnostic = status_receiver.recv().await.unwrap();
+        let LspStatusUpdate::Diagnostic(message) = diagnostic else {
+            panic!("expected workspace-symbol diagnostic");
+        };
+        assert!(message.contains("workspace/symbol(\"missing\") returned 0 candidate(s)"));
+        assert!(message.contains("server may still be indexing"));
+
+        drop(rpc_client);
+        connection_task.abort();
+        let _ = connection_task.await;
     }
 
     #[tokio::test]

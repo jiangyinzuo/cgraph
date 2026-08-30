@@ -116,16 +116,50 @@ pub enum SearchStatus {
     Error(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchField {
+    LspQuery,
+    Symbol,
+    Uri,
+}
+
+impl SearchField {
+    fn next(self) -> Self {
+        match self {
+            Self::LspQuery => Self::Symbol,
+            Self::Symbol => Self::Uri,
+            Self::Uri => Self::LspQuery,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SearchState {
     pub kind: SearchKind,
-    pub input: String,
+    pub lsp_query: String,
+    pub symbol_query: String,
+    pub uri_query: String,
+    pub active_field: SearchField,
     pub items: Vec<SearchItem>,
     pub selected: Option<usize>,
     pub status: SearchStatus,
     candidates: Vec<SearchItem>,
     request_id: u64,
     provider_available: bool,
+}
+
+impl SearchState {
+    fn active_input_mut(&mut self) -> &mut String {
+        match self.active_field {
+            SearchField::LspQuery => &mut self.lsp_query,
+            SearchField::Symbol => &mut self.symbol_query,
+            SearchField::Uri => &mut self.uri_query,
+        }
+    }
+
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -289,7 +323,10 @@ impl App {
         self.pending_key = None;
         self.search = Some(SearchState {
             kind,
-            input: String::new(),
+            lsp_query: String::new(),
+            symbol_query: String::new(),
+            uri_query: String::new(),
+            active_field: SearchField::LspQuery,
             items: Vec::new(),
             selected: None,
             status,
@@ -307,16 +344,33 @@ impl App {
 
     pub fn push_search_char(&mut self, character: char) -> Option<SearchRequest> {
         let search = self.search.as_mut()?;
-        search.input.push(character);
+        let query_lsp = search.active_field == SearchField::LspQuery;
+        search.active_input_mut().push(character);
         refresh_search_items(search);
-        self.request_current_search()
+        if query_lsp {
+            self.request_current_search()
+        } else {
+            None
+        }
     }
 
     pub fn pop_search_char(&mut self) -> Option<SearchRequest> {
         let search = self.search.as_mut()?;
-        search.input.pop();
+        let query_lsp = search.active_field == SearchField::LspQuery;
+        search.active_input_mut().pop();
         refresh_search_items(search);
-        self.request_current_search()
+        if query_lsp {
+            self.request_current_search()
+        } else {
+            None
+        }
+    }
+
+    pub fn cycle_search_field(&mut self) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        search.active_field = search.active_field.next();
     }
 
     pub fn finish_search(&mut self, request_id: u64, result: Result<Vec<SearchItem>, String>) {
@@ -725,12 +779,7 @@ impl App {
         Some(SearchRequest {
             request_id,
             kind: search.kind,
-            query: search
-                .input
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_owned(),
+            query: search.lsp_query.clone(),
         })
     }
 }
@@ -756,7 +805,7 @@ fn candidate_is_visible(
 mod tests {
     use clap::Parser;
 
-    use super::{App, SearchItem, SearchKind, SearchStatus};
+    use super::{App, SearchField, SearchItem, SearchKind, SearchStatus};
     use crate::{
         cli::Cli,
         config::SymbolFilter,
@@ -767,7 +816,7 @@ mod tests {
     };
 
     #[test]
-    fn queries_on_open_and_after_each_text_change() {
+    fn lsp_field_queries_on_open_and_sends_its_complete_text() {
         let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
         let open_request = app.open_search(SearchKind::Call, true).unwrap();
 
@@ -777,9 +826,12 @@ mod tests {
             SearchStatus::Debouncing
         );
         let first_request = app.push_search_char('F').unwrap();
-        let current_request = app.push_search_char('B').unwrap();
+        let mut current_request = first_request.clone();
+        for character in "oo Bar".chars() {
+            current_request = app.push_search_char(character).unwrap();
+        }
         assert_eq!(first_request.query, "F");
-        assert_eq!(current_request.query, "FB");
+        assert_eq!(current_request.query, "Foo Bar");
         app.start_search(open_request.request_id);
         assert_eq!(
             app.search.as_ref().unwrap().status,
@@ -789,10 +841,7 @@ mod tests {
         assert_eq!(app.search.as_ref().unwrap().status, SearchStatus::Loading);
 
         app.finish_search(open_request.request_id, Ok(vec![item("stale")]));
-        app.finish_search(
-            current_request.request_id,
-            Ok(vec![item("Bar"), item("FooBar"), item("FastBuffer")]),
-        );
+        app.finish_search(current_request.request_id, Ok(vec![item("FooBar")]));
 
         let search = app.search.as_ref().unwrap();
         assert_eq!(
@@ -801,7 +850,7 @@ mod tests {
                 .iter()
                 .map(|item| item.name.as_str())
                 .collect::<Vec<_>>(),
-            ["FooBar", "FastBuffer"]
+            ["FooBar"]
         );
         assert_eq!(search.status, SearchStatus::Ready);
     }
@@ -821,17 +870,21 @@ mod tests {
     }
 
     #[test]
-    fn ranks_exact_prefix_and_subsequence_matches() {
+    fn symbol_field_filters_cached_results_without_requesting_provider() {
         let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
-        app.open_search(SearchKind::Call, true).unwrap();
-        let mut request = None;
-        for character in "main".chars() {
-            request = app.push_search_char(character);
-        }
+        let request = app.open_search(SearchKind::Call, true).unwrap();
         app.finish_search(
-            request.unwrap().request_id,
+            request.request_id,
             Ok(vec![item("my_main"), item("main_loop"), item("main")]),
         );
+        app.cycle_search_field();
+        assert_eq!(
+            app.search.as_ref().unwrap().active_field,
+            SearchField::Symbol
+        );
+        for character in "main".chars() {
+            assert!(app.push_search_char(character).is_none());
+        }
 
         let names = app
             .search
@@ -845,22 +898,18 @@ mod tests {
     }
 
     #[test]
-    fn matches_remaining_query_parts_against_container_and_path() {
+    fn symbol_field_accepts_space_separated_fuzzy_input() {
         let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
-        app.open_search(SearchKind::Call, true).unwrap();
-        let mut request = None;
-        for character in "run service".chars() {
-            request = app.push_search_char(character);
-        }
-        assert_eq!(request.as_ref().unwrap().query, "run");
-        let mut service_run = item("run");
+        let request = app.open_search(SearchKind::Call, true).unwrap();
+        let mut service_run = item("ParserService::thread_worker");
         service_run.container_name = Some("Service".to_owned());
-        let mut controller_run = item("run");
+        let mut controller_run = item("ParserController::run");
         controller_run.container_name = Some("Controller".to_owned());
-        app.finish_search(
-            request.unwrap().request_id,
-            Ok(vec![controller_run, service_run]),
-        );
+        app.finish_search(request.request_id, Ok(vec![controller_run, service_run]));
+        app.cycle_search_field();
+        for character in "prs thrd".chars() {
+            assert!(app.push_search_char(character).is_none());
+        }
 
         let names = app
             .search
@@ -868,9 +917,9 @@ mod tests {
             .unwrap()
             .items
             .iter()
-            .map(|item| item.container_name.as_deref().unwrap())
+            .map(|item| item.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["Service"]);
+        assert_eq!(names, ["ParserService::thread_worker"]);
     }
 
     #[test]
@@ -895,23 +944,48 @@ mod tests {
     }
 
     #[test]
-    fn matches_multiple_trailing_terms_in_unicode_paths() {
+    fn uri_field_filters_cached_results_without_changing_lsp_query() {
         let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
-        app.open_search(SearchKind::Call, true).unwrap();
-        let mut request = None;
-        for character in "run 服务 rs".chars() {
-            request = app.push_search_char(character);
-        }
-        assert_eq!(request.as_ref().unwrap().query, "run");
-
+        let request = app.open_search(SearchKind::Call, true).unwrap();
         let mut candidate = item("run");
-        candidate.location = "file:///workspace/服务.rs:1".to_owned();
-        app.finish_search(request.unwrap().request_id, Ok(vec![candidate]));
+        candidate.location = "/workspace/服务.rs:1".to_owned();
+        candidate.source.as_mut().unwrap().uri = "file:///workspace/服务.rs".to_owned();
+        app.finish_search(request.request_id, Ok(vec![item("other"), candidate]));
+        app.cycle_search_field();
+        app.cycle_search_field();
+        assert_eq!(app.search.as_ref().unwrap().active_field, SearchField::Uri);
+        for character in "file 服务".chars() {
+            assert!(app.push_search_char(character).is_none());
+        }
 
         assert_eq!(
             app.search.as_ref().unwrap().items[0].location,
-            "file:///workspace/服务.rs:1"
+            "/workspace/服务.rs:1"
         );
+    }
+
+    #[test]
+    fn tab_cycles_three_search_fields_without_changing_their_text() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        app.open_search(SearchKind::Call, true).unwrap();
+        app.push_search_char('m').unwrap();
+
+        app.cycle_search_field();
+        assert_eq!(
+            app.search.as_ref().unwrap().active_field,
+            SearchField::Symbol
+        );
+        assert!(app.push_search_char('s').is_none());
+        app.cycle_search_field();
+        assert_eq!(app.search.as_ref().unwrap().active_field, SearchField::Uri);
+        assert!(app.push_search_char('u').is_none());
+        app.cycle_search_field();
+
+        let search = app.search.as_ref().unwrap();
+        assert_eq!(search.active_field, SearchField::LspQuery);
+        assert_eq!(search.lsp_query, "m");
+        assert_eq!(search.symbol_query, "s");
+        assert_eq!(search.uri_query, "u");
     }
 
     #[test]

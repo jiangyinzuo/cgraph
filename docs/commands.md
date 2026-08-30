@@ -22,6 +22,7 @@ cgraph [OPTIONS] [COMMAND]
 | `--workspace <PATH>` | 设置 LSP 工作区，默认是当前目录 |
 | `--lsp <PROGRAM>` | 一次性显式选择语言服务器，覆盖项目配置和自动检测；Python 内置默认是 `pyrefly` |
 | `--lsp-arg <ARG>` | 向语言服务器传递一个参数，可重复使用 |
+| `--lsp-log <PATH>` | 覆盖默认的 `/tmp/cgraph-<server>-<pid>.log` LSP stderr 日志路径 |
 | `--no-lsp` | 禁止自动启动语言服务器 |
 | `--ipc-socket <PATH>` | 在指定 Unix socket 上启用编辑器双向联动；父目录必须已存在 |
 | `-h`, `--help` | 显示帮助 |
@@ -30,9 +31,11 @@ cgraph [OPTIONS] [COMMAND]
 以连字符开头的服务器参数推荐使用等号形式，避免被当成 cgraph 自己的选项：
 
 ```bash
-cgraph --lsp clangd --lsp-arg=--background-index
+cgraph --lsp clangd
 cgraph --lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking
 ```
+
+内置 clangd profile 默认增加 `--background-index`，使 workspace symbol 能够使用并持续更新 `.cache/clangd/index`；显式传入 `--no-background-index` 时尊重用户选择。每次 LSP 会话默认把 server stderr 写入 `/tmp/cgraph-<server>-<pid>.log`，实际路径会进入 `g<` 消息历史。Unix 下新文件权限为 `0600`。
 
 选择 `pyrefly` 时 cgraph 自动添加其必需的 `lsp` 子命令，`--lsp-arg` 只填写 `lsp` 后面的参数。显式 `--lsp pylsp` 仍可覆盖 Python 默认值。项目级命令和参数推荐写入 `.cgraph.toml` 的 `[lsp]` 段，格式见[项目配置](project-configuration.md)。
 
@@ -126,8 +129,9 @@ pager 打开时仍保留最底行快捷键与后端状态。cgraph 暂停 Crosst
 
 | 输入 | 当前行为 |
 | --- | --- |
-| 普通字符 | 编辑查询；约 200 ms 后用第一项重新查询 provider，后续项只在本地模糊筛选 |
-| `Backspace` | 删除一个 Unicode 字符并重新安排查询 |
+| 普通字符 | 编辑当前输入框；只有 LSP Query 会在约 200 ms 后重新查询 provider |
+| `Backspace` | 从当前输入框删除一个 Unicode 字符；仅 LSP Query 会重新安排查询 |
+| `Tab` | 按 LSP Query → Symbol → URI 的顺序循环切换输入框 |
 | `Up`, `Ctrl-p` | 选择上一项 |
 | `Down`, `Ctrl-n` | 选择下一项 |
 | `Enter` | 接受当前结果 |
@@ -138,11 +142,13 @@ pager 打开时仍保留最底行快捷键与后端状态。cgraph 暂停 Crosst
 
 call 搜索当前保留 function、method 和 constructor；type 搜索保留 class、interface、struct、enum 和 type parameter。LSP 与 Tree-sitter 都映射到同一公共 symbol-kind 分类。
 
-打开 `ac` 或 `at` 弹窗会安排一次空文本查询；输入按空白拆分，第一项在约 200 ms 防抖后交给当前 provider，后续项只用于对已返回候选做本地模糊筛选。查询不要求两个字符。LSP 模式下，若前一次请求已经发出，cgraph 会发送 `$/cancelRequest`；无论 provider 是否能停止工作，request id 都会阻止旧结果覆盖当前列表。
+打开 `ac` 或 `at` 弹窗会安排一次空文本查询。默认焦点位于 LSP Query；编辑该栏后，完整文本在约 200 ms 防抖后交给当前 provider，查询不要求两个字符。LSP 模式下，若前一次请求已经发出，cgraph 会发送 `$/cancelRequest`；无论 provider 是否能停止工作，request id 都会阻止旧结果覆盖当前列表。
 
 状态行会区分两个阶段：`Waiting for typing pause…` 表示仍在等待 200 ms 防抖，尚未请求 server；`Searching workspace symbols…` 表示当前 `workspace/symbol` 请求已经开始。
 
-LSP 负责按第一项 query 搜索；Tree-sitter 返回项目静态索引候选。cgraph 对候选去重，并使用 `nucleo-matcher` 进行 Unicode-aware、不区分大小写的本地模糊筛选：第一项约束 symbol name，后续项匹配 symbol name、container name 与路径。默认只展示 `--workspace` 根目录内的项目符号，不展示依赖或其他工作区外文件中的符号。
+LSP Query 只负责请求 provider；Tree-sitter 模式同样用该文本查询项目静态索引。Symbol 只对语言适配后的完整符号名做本地模糊匹配，URI 只对候选 URI/显示路径匹配。编辑后两栏不会重发 provider 请求。cgraph 对候选去重，并使用 `nucleo-matcher` 进行 Unicode-aware、不区分大小写的本地模糊筛选；栏内空白在匹配前忽略，因此 `prs thrd` 是一个保持字符顺序的普通模糊序列，不是 `prs AND thrd`。默认只展示 `--workspace` 根目录内的项目符号，不展示依赖或其他工作区外文件中的符号。
+
+因此可在 LSP Query 输入 `main`，按两次 `Tab` 后在 URI 输入 `parser cpp` 来缩小结果。标准 LSP workspace-symbol 请求没有独立的 file/URI filter 字段；URI 栏只过滤 server 已返回的候选，不依赖 clangd、rust-analyzer 或 Pyrefly 的私有 query 语法，也无法找回 server 未返回的符号。长期排除某类路径应使用 `.cgraph.toml` 的 `[filters].rules`。
 
 ## Save modal 模式
 

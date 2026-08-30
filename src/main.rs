@@ -1,4 +1,8 @@
-use std::{ffi::OsString, fs, path::Path};
+use std::{
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use cgraph::{
@@ -152,27 +156,38 @@ fn lsp_config(cli: &Cli, project_config: &ProjectConfig) -> Option<LspConfig> {
         return None;
     }
 
-    let (program, args, name, file_extensions) = if let Some(program) = cli.lsp.clone() {
-        (program, cli.lsp_args.clone(), None, None)
-    } else if let Some(config) = project_config.lsp.as_ref() {
-        (
-            OsString::from(config.command.as_str()),
-            config.args.iter().map(OsString::from).collect(),
-            Some(config.name.clone()),
-            config.file_extensions.clone(),
-        )
-    } else {
-        let program = detect_language_server(&cli.workspace)?;
-        let name = Path::new(&program)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_owned);
-        (program, Vec::new(), name, None)
-    };
+    let (program, args, name, file_extensions, configured_log) =
+        if let Some(program) = cli.lsp.clone() {
+            (program, cli.lsp_args.clone(), None, None, None)
+        } else if let Some(config) = project_config.lsp.as_ref() {
+            (
+                OsString::from(config.command.as_str()),
+                config.args.iter().map(OsString::from).collect(),
+                Some(config.name.clone()),
+                config.file_extensions.clone(),
+                config.log_file.clone(),
+            )
+        } else {
+            let program = detect_language_server(&cli.workspace)?;
+            let name = Path::new(&program)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            (program, Vec::new(), name, None, None)
+        };
+    let log_file = cli.lsp_log.clone().or(configured_log).unwrap_or_else(|| {
+        default_lsp_log_path(name.as_deref().unwrap_or_else(|| {
+            Path::new(&program)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("lsp")
+        }))
+    });
     let config = LspConfig::for_server(program, &cli.workspace)
         .workspace_only(project_config.workspace_only)
         .path_filter(project_config.path_filter.clone())
-        .filters(project_config.filters.clone());
+        .filters(project_config.filters.clone())
+        .stderr_log(log_file);
     let config = match name {
         Some(name) => config.server_name(name),
         None => config,
@@ -182,6 +197,20 @@ fn lsp_config(cli: &Cli, project_config: &ProjectConfig) -> Option<LspConfig> {
         None => config,
     };
     Some(config.args(args))
+}
+
+fn default_lsp_log_path(server_name: &str) -> PathBuf {
+    let server_name = server_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    std::env::temp_dir().join(format!("cgraph-{server_name}-{}.log", std::process::id()))
 }
 
 fn detect_language_server(workspace: &Path) -> Option<OsString> {
@@ -228,6 +257,7 @@ fn contains_source_with_extension(workspace: &Path, extensions: &[&str]) -> bool
 mod tests {
     use std::{
         fs,
+        path::Path,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -240,7 +270,9 @@ mod tests {
     };
     use clap::Parser;
 
-    use super::{detect_language_server, lsp_config, start_tree_sitter_fallback};
+    use super::{
+        default_lsp_log_path, detect_language_server, lsp_config, start_tree_sitter_fallback,
+    };
 
     #[tokio::test]
     async fn initializes_a_queryable_tree_sitter_fallback_and_reports_ready() {
@@ -319,6 +351,10 @@ mod tests {
         assert_eq!(detected.args, ["lsp"].map(std::ffi::OsString::from));
         assert_eq!(detected.server_name.as_deref(), Some("pyrefly"));
         assert!(detected.workspace_only);
+        assert_eq!(
+            detected.stderr_log.as_deref().and_then(Path::parent),
+            Some(std::env::temp_dir().as_path())
+        );
 
         let explicit = Cli::try_parse_from([
             "cgraph",
@@ -349,6 +385,7 @@ mod tests {
                 command: "custom-lsp".to_owned(),
                 args: vec!["--stdio".to_owned(), "--trace".to_owned()],
                 file_extensions: Some(vec!["cppm".to_owned(), "ixx".to_owned()]),
+                log_file: Some(std::path::PathBuf::from("logs/lsp.log")),
             }),
         };
 
@@ -357,12 +394,28 @@ mod tests {
         assert_eq!(config.program, "custom-lsp");
         assert_eq!(
             config.args,
-            ["--stdio", "--trace"]
+            ["--background-index", "--stdio", "--trace"]
                 .map(std::ffi::OsString::from)
                 .to_vec()
         );
         assert!(config.workspace_only);
         assert_eq!(config.file_extensions, ["cppm", "ixx"]);
+        assert_eq!(
+            config.stderr_log,
+            Some(std::path::PathBuf::from("logs/lsp.log"))
+        );
+    }
+
+    #[test]
+    fn default_lsp_log_uses_temp_directory_and_safe_server_name() {
+        let path = default_lsp_log_path("wrapped/clangd");
+        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("cgraph-wrapped_clangd-")
+        );
     }
 
     #[test]

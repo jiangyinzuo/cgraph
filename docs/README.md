@@ -25,6 +25,7 @@
 - 使用 `?` 打开可滚动的完整键鼠帮助；常驻 footer 只显示高频入口。
 - 通过键盘或鼠标选择搜索结果并创建或重定位 anchor。
 - 在最底栏右侧查看 LSP 连接、后台 progress、警告、错误或断开状态。
+- 通过 `g<` 查看 LSP 初始化/空查询诊断，并从默认 `/tmp` 会话日志读取 server stderr。
 - 在没有 LSP 时使用 Tree-sitter；LSP 缺少某种 hierarchy 能力时按查询粒度静态回退。
 - 同时显示多个图入口和共享节点，并用 `dd` / `dp` / `dn` 取消 anchor 或清除分支。
 - 使用 `tl` / `tr` 懒加载 call/type hierarchy；优先使用已声明能力的 LSP，否则使用同语言 Tree-sitter 后备。菱形关系复用节点，循环/反向边用特殊双线标记。

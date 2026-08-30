@@ -48,9 +48,11 @@ Pyrefly 的 call hierarchy 把短方法名放在 `name`，把 `module.Class.meth
 
 部分 clangd 版本只有在至少一个项目文档经过 `textDocument/didOpen` 后，才会开始提供可用的 workspace symbol 索引；仅发送 initialize 和 `workspace/symbol` 可能持续返回空数组，即使工作区存在 `compile_commands.json`。initialize 完成后，provider 因此会在 C/C++ 工作区确定性查找一个不超过 4 MiB 的配置后缀文件，发送一次 `didOpen`，并在 shutdown 时发送对应的 `didClose`。内置 clangd profile 默认覆盖 `.c/.cc/.cpp/.cxx` 源文件与 `.h/.hh/.hpp/.hxx` 头文件，项目可通过 `[lsp].file_extensions` 覆盖，也能纳入 `ixx/cppm` 等工程约定。这只是触发 clangd 的后台索引，不把源码 overlay 当作用户编辑内容，也不会发送 `didChange` 或 `didSave`。
 
+clangd 的后台全局索引以 SymbolID（通常由 USR 派生）作为身份。同一仓库的多个 executable target 可以各自定义同签名的全局 `main`，但 clangd 可能把它们合并为一个索引符号，并让标准 `workspace/symbol` 只返回一个代表位置。这发生在响应进入 cgraph 之前：`normalize.rs` 只删除名称、kind、URI、range 和 container 全部相同的项，不按名称去重，也无法恢复 server 未返回的位置。LSP client 不与 Tree-sitter workspace-symbol 候选聚合；Tree-sitter 仅承担无 LSP 搜索和 capability 缺失时的 hierarchy 后备。
+
 clangd 的 call hierarchy 可能把系统头文件或第三方依赖作为调用目标返回。例如项目函数调用 `printf` 时，结果可能包含 `/usr/include/stdio.h`；clangd 要求客户端先对该文档发送 `didOpen`，否则 `prepareCallHierarchy` 会返回 `-32602 trying to get AST for non-added document`。cgraph 默认只展示本项目 symbol，因此 Fetch 在转换 hierarchy item 前按 `file://` URI 过滤项目外路径，避免创建不可稳定展开的外部节点。对保留的项目内目标，hierarchy 查询会在 prepare 前按 URI 读取源码并按后缀发送一次标准 `textDocument/didOpen`；同一会话内复用已打开集合，关闭时统一发送 `didClose`。该策略可通过项目配置 `[filters].workspace_only = false` 关闭；关闭后 cgraph 也会尝试打开可读的外部文件，但系统头文件是否有可用 compile command 仍由 clangd 决定。这个过滤是产品范围策略，不是对 LSP 请求格式的 clangd 特判。
 
-扫描跳过隐藏目录、构建目录、`target`、`node_modules` 和符号链接，并限制为 10,000 个目录项。`.c` 使用 LSP language id `c`，其余 clangd profile 后缀使用 `cpp`；这是 profile 的默认语言归属，自定义的特殊语言方言仍应由后续 profile 能力扩展。找不到合适文件时会话仍可启动；若要让 clangd 在大型工程中更积极地预建索引，可通过 `--lsp-arg=--background-index` 显式启用。真实 clangd 集成测试使用最小 `compile_commands.json` 和 `.hpp` 方法定义，验证头文件 URI、方法的命名空间限定名和顶层函数，同时通过工作区 URI 过滤掉系统依赖头文件。
+扫描跳过隐藏目录、构建目录、`target`、`node_modules` 和符号链接，并限制为 10,000 个目录项。`.c` 使用 LSP language id `c`，其余 clangd profile 后缀使用 `cpp`；这是 profile 的默认语言归属，自定义的特殊语言方言仍应由后续 profile 能力扩展。找不到合适文件时会话仍可启动。内置 clangd profile 默认增加 `--background-index`，使大型工程能够加载和更新 `.cache/clangd/index`；显式的 `--no-background-index` 或等价参数优先。真实 clangd 集成测试使用最小 `compile_commands.json` 和 `.hpp` 方法定义，验证头文件 URI、方法的命名空间限定名和顶层函数，同时通过工作区 URI 过滤掉系统依赖头文件。
 
 没有源码位置的 CLI 根会先去掉最后一个 `::` 或 `.` 限定段，再进行 workspace-symbol 定位。因此 Python 输入可以使用惯用 `Class.method`，也兼容已有通用输入。Pyrefly 目前要求 workspace-symbol query 至少 3 个字符；客户端仍发送空文本和短 query，以保持 provider 接口与搜索生命周期一致，空响应不会被解释成能力缺失。
 

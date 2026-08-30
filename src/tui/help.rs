@@ -43,7 +43,8 @@ const HELP_ROWS: &[(&str, &str)] = &[
     ("q / Esc", "quit cgraph"),
     ("", ""),
     ("Search", ""),
-    ("text / Backspace", "edit the fuzzy workspace-symbol query"),
+    ("text / Backspace", "edit the active search field"),
+    ("Tab", "cycle LSP Query, Symbol, and URI fields"),
     (
         "Up / Down",
         "move through results (Ctrl-p / Ctrl-n also work)",

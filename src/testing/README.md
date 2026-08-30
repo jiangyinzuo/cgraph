@@ -16,61 +16,63 @@
 
 ## 自动化清单
 
-当前共有 **137 个自动化测试**，其中 136 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
+当前共有 **146 个自动化测试**，其中 145 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
 
 <!-- test-inventory
-src/app.rs: 19
+src/app.rs: 20
 src/app/config.rs: 1
 src/app/fuzzy.rs: 2
 src/app/save.rs: 1
-src/cli.rs: 4
+src/cli.rs: 5
 src/config/mod.rs: 4
 src/config/filter.rs: 6
 src/export/mod.rs: 3
-src/fetch/lsp.rs: 18
+src/fetch/lsp.rs: 19
 src/fetch/lsp/clangd.rs: 1
+src/fetch/lsp/profile.rs: 2
 src/fetch/lsp/symbol_names.rs: 5
 src/fetch/treesitter.rs: 9
 src/ipc/tests.rs: 5
 src/ipc/protocol.rs: 2
-src/main.rs: 4
+src/main.rs: 5
 src/state/graph.rs: 9
 src/tui/canvas/connections.rs: 4
 src/tui/config_editor.rs: 2
 src/tui/help.rs: 1
 src/tui/messages.rs: 2
-src/tui/mod.rs: 30
+src/tui/mod.rs: 31
 src/tui/save.rs: 2
-src/tui/search.rs: 2
+src/tui/search.rs: 4
 tests/test_documentation.rs: 1
-total: 137
+total: 146
 -->
 
 | 位置 | 数量 | 类型 | 主要覆盖 |
 | --- | ---: | --- | --- |
-| `src/app.rs` | 19 | 状态机单元测试 | 搜索生命周期、第一项 LSP 查询、空查询、本地多项过滤、Unicode 路径匹配、项目符号过滤、模糊排序、根管理、hierarchy 加载/缓存/刷新/去重/竞态、Tree-sitter 提示和外部聚焦 |
+| `src/app.rs` | 20 | 状态机单元测试 | 搜索生命周期、完整 LSP Query、三栏焦点循环、Symbol/URI 缓存过滤、空查询、Unicode 路径匹配、项目符号过滤、模糊排序、根管理、hierarchy 加载/缓存/刷新/去重/竞态、Tree-sitter 提示和外部聚焦 |
 | `src/app/config.rs` | 1 | 配置重载状态机测试 | 全部成功空/已加载/正在刷新分支、新 request id、过滤应用、anchor 保留与迟到结果拒绝 |
-| `src/app/fuzzy.rs` | 2 | 模糊匹配适配器单元测试 | 通过 `nucleo-matcher` 验证 Unicode 子序列和多词元数据匹配 |
+| `src/app/fuzzy.rs` | 2 | 模糊匹配适配器单元测试 | 通过 `nucleo-matcher` 验证 Unicode 子序列和忽略输入空白的单序列匹配 |
 | `src/app/save.rs` | 1 | 保存状态单元测试 | 路径编辑、错误保留与再次编辑恢复 |
-| `src/cli.rs` | 4 | 解析测试 | call 子命令、空画布、LSP 参数位置、IPC socket 路径 |
+| `src/cli.rs` | 5 | 解析测试 | call 子命令、空画布、LSP 参数位置、LSP 日志覆盖、IPC socket 路径 |
 | `src/config/mod.rs` | 4 | 配置加载单元测试 | 缺省加载、严格 TOML、统一规则列表、默认项目范围、外部 `printf` 例外、LSP 文件后缀规范化及非法值 |
 | `src/config/filter.rs` | 6 | 过滤规则单元测试 | `FilterConfig` 的 `FilePath` / `Symbol` 规则分类、有序覆盖、跨类型 `!#printf` 重新包含、`<all>` / `<workspace>` 占位符、Unicode `*`、路径 `*` / `**` 层级语义 |
 | `src/export/mod.rs` | 3 | 序列化与文件系统测试 | 稳定人类可读格式、共享节点/循环、空路径、安全创建与禁止覆盖 |
-| `src/fetch/lsp.rs` | 18 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、call/type hierarchy、项目外 hierarchy URI 过滤（含 clangd `printf` 头文件回归）、clangd 头文件按需 `didOpen` 后 hierarchy 回归、动态 capability、未注册 type hierarchy 的 Tree-sitter 回退、Pyrefly/clangd 命令与索引 bootstrap、取消、进度、安全限制、UTF-16 position 协商，以及条件执行的真实 Pyrefly/rust-analyzer/clangd 最小和多文件工作区（call hierarchy 与 type hierarchy/fallback） |
+| `src/fetch/lsp.rs` | 19 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、空查询诊断统计、call/type hierarchy、项目外 hierarchy URI 过滤（含 clangd `printf` 头文件回归）、clangd 头文件按需 `didOpen` 后 hierarchy 回归、动态 capability、未注册 type hierarchy 的 Tree-sitter 回退、Pyrefly/clangd 命令与索引 bootstrap、取消、进度、安全限制、UTF-16 position 协商，以及条件执行的真实 Pyrefly/rust-analyzer/clangd 最小和多文件工作区（call hierarchy 与 type hierarchy/fallback） |
 | `src/fetch/lsp/clangd.rs` | 1 | clangd bootstrap 单元测试 | 头文件默认语言 id、项目自定义扩展名与不匹配扩展名 |
+| `src/fetch/lsp/profile.rs` | 2 | LSP profile 参数测试 | clangd 默认后台索引、幂等补全与显式禁用策略优先 |
 | `src/fetch/lsp/symbol_names.rs` | 5 | LSP 方言适配单元测试 | server 识别、Rust inherent/trait impl、Pyrefly 点号限定名、非法 detail 降级、通用协议边界 |
 | `src/fetch/treesitter.rs` | 9 | 文件系统与静态索引集成测试 | 语言检测、四种 grammar、Rust/Python/C/C++ 符号与调用、Rust/C++/Python 类型关系、限定方法名、UTF-16 列归一化、目录排除、歧义拒绝和取消安全的单次索引 |
 | `src/ipc/tests.rs` | 5 | Unix socket 异步集成测试 | 私有父目录、`0600` 权限、多客户端广播、请求路由与相同 request id 响应、版本拒绝、1 MiB 入站限制、陈旧 socket 回收和 inode 保护 |
 | `src/ipc/protocol.rs` | 2 | 序列化契约测试 | 版本化 tagged request、无 request id 的 UTF-16 零基打开位置事件 |
-| `src/main.rs` | 4 | 组装/降级测试 | Python 默认 Pyrefly、显式 pylsp 覆盖、项目 `[lsp]` 命令/扩展名覆盖内置检测、C/C++ 源文件和头文件自动检测、Tree-sitter fallback 与统一状态 |
+| `src/main.rs` | 5 | 组装/降级测试 | Python 默认 Pyrefly、显式 pylsp 覆盖、项目 `[lsp]` 命令/扩展名/日志覆盖、默认 `/tmp` 日志命名、C/C++ 源文件和头文件自动检测、Tree-sitter fallback 与统一状态 |
 | `src/state/graph.rs` | 9 | 图领域模型单元测试 | 菱形全局去重、双向边观察、循环、自环、身份解析、边迁移、共享边清除、可见/已知图投影 |
 | `src/tui/canvas/connections.rs` | 4 | 连线几何与渲染单元测试 | 正交圆角、真实普通交叉高亮、单/双线 `╪` / `╫` 轴向语义、极远线段先裁剪后栅格化 |
 | `src/tui/config_editor.rs` | 2 | 外部进程与选择单元测试 | `$EDITER` 优先、`$EDITOR` 回退、缺失诊断、真实子进程收到准确配置路径和最小模板 |
 | `src/tui/help.rs` | 1 | 帮助输入与渲染集成测试 | Shift-`?`、完整内容、Canvas 拦截、键鼠滚动、小终端裁剪、关闭和状态稳定 |
 | `src/tui/messages.rs` | 2 | 消息 pager 组件测试 | less 风格导航、Unicode 换行、`V` 行选择、软换行原文复制、`q` 关闭、保留底行和最多 15 行布局 |
-| `src/tui/mod.rs` | 30 | 输入、布局和渲染组件测试 | 键鼠映射、`ec` 前缀、固定 footer、倒数第二行消息、`g<` pager 保留底栏、无边框画布标题与选中 URI、保存、IPC、位置锚定、刷新、拖拽/裁剪、空间导航、布局、连线和终端缓冲区 |
+| `src/tui/mod.rs` | 31 | 输入、布局和渲染组件测试 | 键鼠映射、`ec` 前缀、固定 footer、LSP 诊断不覆盖连接状态、倒数第二行消息、`g<` pager 保留底栏、无边框画布标题与选中 URI、保存、IPC、位置锚定、刷新、拖拽/裁剪、空间导航、布局、连线和终端缓冲区 |
 | `src/tui/save.rs` | 2 | 保存弹窗组件测试 | 已有目标保持不变并显示错误、成功写入并显示路径 |
-| `src/tui/search.rs` | 2 | 搜索展示与布局单元测试 | Rust/C++ `::` 与 Python `.` 限定名不重复追加 container 标签、workspace symbol 弹窗大屏比例与小屏边界 |
+| `src/tui/search.rs` | 4 | 搜索展示与布局单元测试 | Rust/C++ `::` 与 Python `.` 限定名不重复追加 container 标签、workspace symbol 弹窗大屏比例与小屏边界、三输入框共享边界渲染及 `Tab` 焦点循环 |
 | `tests/test_documentation.rs` | 1 | 仓库一致性测试 | 本清单与测试注解逐文件一致 |
 
 `examples/` 会被 `cargo test --all-targets` 编译，但当前没有测试函数，因此不计入上述数量。
@@ -100,7 +102,7 @@ Hierarchy 测试重点验证：
 - Tree-sitter 成功结果写入明确的语法级置信度提示，不把静态子集冒充完整语义。
 - 配置重载刷新每个已加载或正在刷新的可达方向，包括成功空分支；新 request id 拒绝编辑期间的旧结果，新过滤器作用于响应且 anchors 保留。
 
-搜索测试使用同样模式验证防抖前状态、请求开始、旧会话结果拒绝、空输入展示全部候选、第一项作为 LSP 查询以及后续词对容器/路径的本地模糊筛选。`src/app/fuzzy.rs` 单独验证第三方 matcher 的 Unicode 与多词行为。
+搜索测试使用同样模式验证防抖前状态、请求开始、旧会话结果拒绝、空输入展示全部候选、完整 LSP Query、Symbol/URI 对缓存候选的独立筛选，以及 `Tab` 循环不会安排 provider 请求。`src/app/fuzzy.rs` 单独验证第三方 matcher 的 Unicode 行为和“忽略空白但不解析布尔词项”的单序列语义。
 
 ### LSP 协议测试
 
@@ -116,6 +118,9 @@ LSP 测试使用 `tokio::io::duplex` 连接真实 `JsonRpcClient` actor 与测�
 - rust-analyzer 风格的 `Function` call item 与签名 detail 会触发 document symbol 请求，并用 `impl Type` container 生成 `Type::method`；同 URI 的重复 item 只请求一次。
 - future 被 abort 后发送 `$/cancelRequest`。
 - 非法超大消息在分配前被拒绝。
+- 空 workspace-symbol 响应产生包含 query、候选数、过滤后数量和耗时的诊断事件。
+
+LSP profile 单元测试固定 clangd 默认 `--background-index`、重复应用的幂等性和显式 `--no-background-index` 优先级。主程序组装测试固定默认 `/tmp/cgraph-<server>-<pid>.log` 命名和项目日志覆盖；TUI 测试确认诊断进入消息历史但不把 Ready 状态改成 Warning/Error。
 
 模拟 server 仍是稳定、快速且不依赖本机工具链的主要协议测试。另有三个条件执行的真实 server 测试：`pyrefly` 位于 `PATH` 时验证 `pyrefly lsp`、受控 `didOpen` 索引引导、workspace symbol、incoming call hierarchy、Python type hierarchy（服务端不提供时走真实 Tree-sitter fallback）和 `Worker.run` 名称；`rust-analyzer` 位于 `PATH` 时验证最小 Cargo workspace、workspace symbol、outgoing call hierarchy 和 Rust type hierarchy fallback，并在索引尚未稳定而返回 `content modified` 时于总超时内重试；`clangd` 位于 `PATH` 时验证带 `compile_commands.json` 的 C++ 工作区、默认启动参数、workspace symbol、头文件中的 `Worker::run` outgoing call hierarchy、C++ type hierarchy（服务端不提供时走真实 Tree-sitter fallback）、`main` 函数，以及 workspace symbol 位于未 bootstrap 头文件时并发 incoming/outgoing hierarchy 会先按需 `didOpen` 且分别返回正确结果。对应命令不存在或 `--version` 失败时，测试打印跳过原因并返回，不让缺少可选开发工具的普通 CI 失败。
 
@@ -232,7 +237,7 @@ CLI 测试使用 Clap `try_parse_from`，IPC 协议测试检查 request 与 even
 
 ### 真实语言服务器覆盖缺口
 
-当前已有条件执行的 Pyrefly、rust-analyzer 与 clangd 最小集成测试，并保留 `examples/lsp_workspace_symbols.rs` 和 `examples/lsp_hierarchy.rs` 供手工诊断。仍未自动覆盖 pylsp、固定 server 版本矩阵、冷/热索引性能、后台文件变化和 clangd 的大型工程索引边界。真实 server 测试依赖本机工具和索引速度；命令不存在时安全跳过，存在时在固定总超时内轮询，避免把普通协议正确性测试变成强制工具链依赖。
+当前已有条件执行的 Pyrefly、rust-analyzer 与 clangd 最小集成测试，并保留 `examples/lsp_workspace_symbols.rs` 和 `examples/lsp_hierarchy.rs` 供手工诊断。仍未自动覆盖 pylsp、固定 server 版本矩阵、冷/热索引性能、后台文件变化和 clangd 的大型工程索引边界。尤其没有把“跨 executable target 的同 USR `main` 被 clangd 合并”固化为自动断言，因为它属于 server 版本与索引实现细节；现有协议测试只保证 cgraph 删除完全相同的响应项、不按名称合并不同位置，也不宣称能枚举 server 未返回的定义。真实 server 测试依赖本机工具和索引速度；命令不存在时安全跳过，存在时在固定总超时内轮询，避免把普通协议正确性测试变成强制工具链依赖。
 
 ### 完整 PTY 端到端测试
 

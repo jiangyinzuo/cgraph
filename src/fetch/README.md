@@ -25,7 +25,9 @@ LSP actor 的协议边界保持通用：它发送标准 initialize、initialized
 
 ## VS Code 式 workspace symbol 查询
 
-`WorkspaceSymbolClient::query` 接收搜索输入按空白分隔后的第一项，不尝试枚举完整索引，也允许空字符串。TUI 负责与 VS Code 相同的约 200 ms 防抖节奏，后续输入项由 App 在候选元数据上本地筛选；Fetch 层只负责一次查询的协议语义。server 返回后先删除完全相同的符号，再按 URI 做项目范围过滤：只有能够转换为本地文件路径且位于 canonical workspace root 下的符号才保留。
+`WorkspaceSymbolClient::query` 接收 LSP Query 输入框的完整文本，不尝试枚举完整索引，也允许空字符串。TUI 负责与 VS Code 相同的约 200 ms 防抖节奏；Symbol 与 URI 输入由 App 分别在完整显示名和 URI/显示路径上本地筛选，Fetch 层只负责一次查询的协议语义。server 返回后先删除名称、kind、URI、range 和 container 全部相同的协议级重复项，再按 URI 做项目范围过滤：只有能够转换为本地文件路径且位于 canonical workspace root 下的符号才保留。同名但位置不同的项不会被客户端合并。
+
+`WorkspaceSymbolClient` 是互斥 provider 枚举，不是聚合器：LSP 会话存在时只返回 LSP 响应；Tree-sitter workspace symbols 只用于无 LSP fallback。尤其不能为了补齐 clangd 按 SymbolID/USR 合并的同名全局定义而混入语法扫描结果，因为两者的索引身份和完整性语义不同。标准 LSP 没有 workspace 范围枚举所有定义 occurrence 的请求，provider 没有返回的位置必须保持不可见而不是由另一后端猜测。
 
 rust-analyzer 默认的 workspace symbol 只搜索类型。cgraph 会把 `scope=workspace` 与 `kind=all_symbols` 递归合并进 initialization options，同时保留调用方的其他设置；`workspace/configuration` 也返回相同策略。cgraph 不覆盖默认 limit，因为 rust-analyzer 的 128 项默认值就是为“客户端随过滤文本重新查询”的模式设计的。服务端差异必须收敛在 Fetch 层，App/TUI 不应知道 rust-analyzer 的私有查询标记。
 
@@ -69,7 +71,7 @@ rust-analyzer `experimental/serverStatus` 的 `health=warning/error` 映射为�
 - 单条消息限制为 16 MiB，避免错误或恶意服务端造成无界分配。
 - 支持响应、通知和常见服务端反向请求。
 - 未实现的服务端请求返回 JSON-RPC `Method not found`，不静默伪造成功。
-- LSP stderr 当前丢弃，以免破坏备用屏幕；后续应接入文件日志或内存诊断缓冲区。
+- LSP stderr 不写入备用屏幕，而是由主程序默认追加到 `/tmp/cgraph-<server>-<pid>.log`；Unix 新文件权限为 `0600`。初始化摘要和空 workspace-symbol 查询统计通过统一消息历史展示。
 
 ## 统一 hierarchy 查询
 

@@ -100,7 +100,7 @@ export -> state
 - 为大图增加图版本号和布局快照缓存，避免无状态变化时每帧重算 SCC 与 rank。
 - 将 `App` 拆为 canvas、modal、command-prefix 等子状态，避免单一结构持续膨胀。
 - 为 Tree-sitter 索引增加文件变更失效、取消、规模上限和可观测进度；当前索引在会话内构建一次。
-- 为 LSP 查询增加超时、日志和服务端崩溃后的恢复策略；请求取消和基础 progress 展示已经实现。
+- 为 LSP 查询增加超时、日志轮转和服务端崩溃后的恢复策略；请求取消、基础 progress、空查询统计与每会话 stderr 文件已经实现。
 - 为 IPC 增加 capability handshake、实例发现和真实 Neovim/PTY 端到端测试；双向 NDJSON、入站限制、App command 路由、实例路径和 socket 清理规则已经固化。
 
 各模块的具体难点与 TODO 记录在对应目录的 README 中。

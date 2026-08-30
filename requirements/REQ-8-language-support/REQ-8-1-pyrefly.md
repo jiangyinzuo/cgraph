@@ -31,7 +31,7 @@ Python 工作区无需额外参数即可使用 Pyrefly 的 workspace symbol、ca
 - 显式 `--lsp pylsp` 不会错误附加 Pyrefly 子命令。
 - 通过可执行文件名或 initialize 返回的 `pyrefly-lsp` server name 都能选择 Pyrefly 名称适配器。
 - `worker.Worker.run` detail 归一化为 `Worker.run`；普通模块函数和路径样式 detail 不被错误限定。
-- cgraph 继续在弹窗打开和每次输入后发送第一项 query，后续项只在本地模糊筛选；Pyrefly 当前对少于 3 个字符的 workspace-symbol 查询返回空结果属于 server 限制，客户端不伪造候选。
+- cgraph 继续在弹窗打开和每次编辑 LSP Query 后发送该栏完整文本；Symbol/URI 栏只做本地模糊筛选。Pyrefly 当前对少于 3 个字符的 workspace-symbol 查询返回空结果属于 server 限制，客户端不伪造候选。
 - 环境中存在 `pyrefly` 时，真实最小 Python workspace 能搜索到 `helper`，其 incoming call hierarchy 包含 `Worker.run`；命令不存在时测试安全跳过。
 
 ## 当前实现与差距

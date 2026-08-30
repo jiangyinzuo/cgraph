@@ -39,8 +39,64 @@ pub(super) fn file_extensions(server_name: &str) -> &'static [&'static str] {
     }
 }
 
-pub(super) fn ensure_pyrefly_subcommand(args: &mut Vec<OsString>, profile: ServerProfile) {
-    if profile == ServerProfile::Pyrefly && !args.iter().any(|arg| arg == "lsp") {
-        args.insert(0, OsString::from("lsp"));
+pub(super) fn apply_default_args(args: &mut Vec<OsString>, profile: ServerProfile) {
+    match profile {
+        ServerProfile::Pyrefly if !args.iter().any(|arg| arg == "lsp") => {
+            args.insert(0, OsString::from("lsp"));
+        }
+        ServerProfile::Clangd if !has_background_index_setting(args) => {
+            args.push(OsString::from("--background-index"));
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn append_configured_args(
+    args: &mut Vec<OsString>,
+    configured: impl IntoIterator<Item = OsString>,
+    profile: ServerProfile,
+) {
+    let configured = configured.into_iter().collect::<Vec<_>>();
+    if profile == ServerProfile::Clangd && has_background_index_setting(&configured) {
+        args.retain(|arg| arg != "--background-index");
+    }
+    args.extend(configured);
+    apply_default_args(args, profile);
+}
+
+fn has_background_index_setting(args: &[OsString]) -> bool {
+    args.iter().any(|arg| {
+        let arg = arg.to_string_lossy();
+        arg == "--background-index"
+            || arg == "--no-background-index"
+            || arg.starts_with("--background-index=")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::{ServerProfile, append_configured_args, apply_default_args};
+
+    #[test]
+    fn enables_clangd_background_index_by_default() {
+        let mut args = Vec::new();
+        apply_default_args(&mut args, ServerProfile::Clangd);
+        apply_default_args(&mut args, ServerProfile::Clangd);
+
+        assert_eq!(args, [OsString::from("--background-index")]);
+    }
+
+    #[test]
+    fn preserves_explicit_clangd_background_index_policy() {
+        let mut args = vec![OsString::from("--background-index")];
+        append_configured_args(
+            &mut args,
+            [OsString::from("--no-background-index")],
+            ServerProfile::Clangd,
+        );
+
+        assert_eq!(args, [OsString::from("--no-background-index")]);
     }
 }

@@ -26,21 +26,22 @@ TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左�
 [lsp]
 name = "clangd"
 command = "clangd"
-args = ["--background-index"]
+args = []
 file_extensions = ["c", "cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]
+log_file = "logs/clangd.log"
 ```
 
-`name` 选择 server profile/语言方言，`command` 是实际可执行文件（可以是包装脚本或绝对路径），`args` 是按顺序传递的参数数组，不经过 shell。`file_extensions` 是该 profile 的项目文件后缀列表，用于选择触发 server 索引的 bootstrap 文档；写 `hpp` 或 `.hpp` 均可，配置会规范化为小写后缀，但不接受路径和 `*`。省略时，内置 clangd profile 会同时覆盖 C/C++ 源文件与 `h/hh/hpp/hxx` 头文件；Rust 与 Pyrefly 分别使用 `rs` 和 `py/pyi`。省略 `[lsp]` 时，cgraph 使用内置默认 profile：`Cargo.toml` 选择 `rust-analyzer`，C/C++ 标志选择 `clangd`，Python 标志选择 `pyrefly lsp`。项目配置适合提交到版本库；通过 `ec` 修改后，LSP 配置会在下次启动生效。
+`name` 选择 server profile/语言方言，`command` 是实际可执行文件（可以是包装脚本或绝对路径），`args` 是按顺序传递的参数数组，不经过 shell。内置 clangd profile 默认启用 `--background-index`；显式 `--no-background-index` 时尊重用户配置。`file_extensions` 是该 profile 的项目文件后缀列表，用于选择触发 server 索引的 bootstrap 文档；写 `hpp` 或 `.hpp` 均可，配置会规范化为小写后缀，但不接受路径和 `*`。省略时，内置 clangd profile 会同时覆盖 C/C++ 源文件与 `h/hh/hpp/hxx` 头文件；Rust 与 Pyrefly 分别使用 `rs` 和 `py/pyi`。`log_file` 保存 server stderr，相对路径按 workspace 解析；省略时使用 `/tmp/cgraph-<server>-<pid>.log`。省略 `[lsp]` 时，cgraph 使用内置默认 profile：`Cargo.toml` 选择 `rust-analyzer`，C/C++ 标志选择 `clangd --background-index`，Python 标志选择 `pyrefly lsp`。项目配置适合提交到版本库；通过 `ec` 修改后，LSP 配置会在下次启动生效。
 
 ```bash
 cgraph --lsp rust-analyzer --workspace /work/project
-cgraph --lsp clangd --lsp-arg=--background-index --workspace /work/project
+cgraph --lsp clangd --workspace /work/project
 cgraph --lsp pyrefly --workspace /work/project
 # 仍可显式选择其他 Python LSP：
 cgraph --lsp pylsp --workspace /work/project
 ```
 
-`--lsp` 当前接受可执行程序名，不解析一整段 shell 命令。每个参数都要单独写成 `--lsp-arg`，这样可以避免 shell 拼接和转义歧义；CLI 参数优先于 `.cgraph.toml`。Pyrefly 是已知例外：选择可执行文件 `pyrefly` 时，cgraph 自动把 `lsp` 作为第一个参数，用户不应再手工添加；例如可用 `--lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking` 覆盖其索引模式。
+`--lsp` 当前接受可执行程序名，不解析一整段 shell 命令。每个参数都要单独写成 `--lsp-arg`，这样可以避免 shell 拼接和转义歧义；`--lsp-log` 覆盖 stderr 日志路径，CLI 参数优先于 `.cgraph.toml`。Pyrefly 是已知例外：选择可执行文件 `pyrefly` 时，cgraph 自动把 `lsp` 作为第一个参数，用户不应再手工添加；例如可用 `--lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking` 覆盖其索引模式。
 
 ## 标准协议边界与配置边界
 
@@ -70,13 +71,17 @@ initialize 成功后，底部状态摘要首先显示 `Ready`。这只表示 LSP
 
 cgraph 会持续读取标准 `$/progress` work-done 通知，并显示最近更新的活动任务。多个任务并行时，一个任务结束不会错误地把整体状态切回 `Ready`；最后一个已知任务结束后才恢复就绪。任务提供百分比时会限制在 0–100 后显示。rust-analyzer 的 `experimental/serverStatus` 会转换为相同的 `Ready`、`Working`、`Warning` 或 `Error` 状态。连接结束则显示 `Disconnected`。
 
-并非所有语言服务器都会发送进度通知。没有进度不代表没有后台索引，`Ready` 的准确含义仍受 server 实现限制。cgraph 当前也不从 stderr 推断状态。
+并非所有语言服务器都会发送进度通知。没有进度不代表没有后台索引，`Ready` 的准确含义仍受 server 实现限制。cgraph 不从自由格式 stderr 推断状态，但会把它保存到初始化摘要所示的日志文件，并在空 workspace-symbol 查询时把候选数量和耗时写入 `g<` 消息历史。
 
 ## 索引与查询时机
 
 语言服务器可能在 initialize 后继续索引。cgraph 会在后台处理 `workspace/configuration` 等反向请求，所以索引不会因为 UI 空闲而停住；但大型项目的第一次查询仍可能较慢或暂时为空。
 
-cgraph 采用与 VS Code workspace symbol quick access 相同的查询节奏。打开 `ac` / `at` 或输入发生变化后，会等待约 200 ms；期间再次输入会重置计时。输入按空白拆分，等待结束后只有第一项文本通过 `workspace/symbol` 发送给 LSP；后续项保留在 App 内，对已返回候选执行本地模糊筛选。空输入仍以空文本发送。Tree-sitter 模式从惰性项目索引返回候选，再由 App 做相同的本地筛选。
+cgraph 采用与 VS Code workspace symbol quick access 相同的防抖与取消节奏，但把服务端查询和两类本地筛选显式拆成三个输入框。打开 `ac` / `at` 或 LSP Query 发生变化后，会等待约 200 ms；期间继续编辑这一栏会重置计时。等待结束后，LSP Query 的完整文本通过 `workspace/symbol` 发送给 LSP，空输入仍以空文本发送。Symbol 与 URI 只筛选已返回候选，编辑或用 `Tab` 切换它们都不会请求 server。Tree-sitter 模式从惰性项目索引返回候选，再由 App 做相同的本地筛选。
+
+LSP 3.17 的 `WorkspaceSymbolParams` 定义通用 `query`，没有标准 file URI/path filter。cgraph 因此把 LSP Query 原样发送给 server，再分别用 Symbol 和 URI 输入框对完整显示名、URI/显示路径做本地模糊匹配。这样无需为 clangd 等 server 引入私有请求格式，但本地 URI 条件只能缩小 server 已返回的集合。
+
+LSP 模式不会把 Tree-sitter 扫描结果补入 `workspace/symbol` 响应。两种 provider 的索引模型、命名和完整性保证不同，混合候选会让用户无法判断结果来自语言服务器还是语法扫描；因此 LSP 可用时搜索结果严格以 server 响应为边界，Tree-sitter workspace-symbol 搜索只用于没有 LSP 会话的模式。标准 LSP 也没有 workspace 范围的“枚举每个定义出现位置”请求。
 
 UI 在等待阶段显示 `Waiting for typing pause…`。防抖结束后，后台任务先通知 App 请求已经开始，再调用 provider client，此时状态才切换为 `Searching workspace symbols…`。这两个状态分别表示客户端本地等待和实际 provider 查询；Tree-sitter 的第一次查询包含项目索引时间。
 
@@ -84,9 +89,11 @@ UI 在等待阶段显示 `Waiting for typing pause…`。防抖结束后，后�
 
 rust-analyzer 默认只搜索类型。cgraph 在 initialization options 和 `workspace/configuration` 中设置 `kind=all_symbols` 与 `scope=workspace`，使 call 搜索可以获得函数，同时不包含依赖；结果数量保留 rust-analyzer 为逐查询客户端设计的默认 128 项上限。其他 server 直接接收标准查询文本。
 
-provider 返回后，cgraph 会按符号身份去重、按 call/type 所需的 `SymbolKind` 过滤，并使用 `nucleo-matcher` 进行 Unicode-aware、不区分大小写的本地模糊筛选。第一项匹配 symbol name；后续项匹配 symbol name、container name 与 URI 路径。默认情况下 LSP 结果还会只保留 URI 位于 canonical workspace 根目录下的符号；项目配置 `[filters].workspace_only = false` 可以关闭这一范围过滤。Tree-sitter 从一开始只扫描项目源文件，并跳过隐藏目录、`target`、`node_modules` 和符号链接。
+provider 返回后，cgraph 会按符号身份去重、按 call/type 所需的 `SymbolKind` 过滤，并使用 `nucleo-matcher` 进行 Unicode-aware、不区分大小写的本地模糊筛选。Symbol 匹配完整 display name，URI 匹配 URI/显示路径；每栏空白只作可读分隔，匹配前忽略，整栏仍是一个有序模糊子序列而非多个 AND 条件。两个本地栏同时非空时，候选需要分别通过两栏。默认情况下 LSP 结果还会只保留 URI 位于 canonical workspace 根目录下的符号；项目配置 `[filters].workspace_only = false` 可以关闭这一范围过滤。Tree-sitter 从一开始只扫描项目源文件，并跳过隐藏目录、`target`、`node_modules` 和符号链接。
 
-Pyrefly 自身只在 query 至少有 3 个字符时执行 workspace-symbol 搜索；空文本、1 个字符或 2 个字符会返回空结果。cgraph 仍按统一节奏发送第一项 query，不在 UI 中制造额外门槛，也不会为 server 未返回的内容伪造候选。Pyrefly 默认的后台索引模式声明标准 call/type hierarchy；使用 `--indexing-mode none` 会由 server 关闭这些能力。Pyrefly hierarchy 中能够确认的方法按 `Class.method` 显示，模块函数保持原名。
+这里的去重只删除名称、kind、URI、range 和 container 全部相同的协议级重复项，不按名称合并不同文件中的同名定义。不过 server 可能在响应前使用自己的索引身份合并条目：clangd 的全局索引以 SymbolID（通常由 USR 派生）组织符号，多个独立 executable target 中同签名的全局 `main` 可能只由 `workspace/symbol` 返回一个代表位置。cgraph 的 Symbol/URI 筛选无法恢复 server 没有返回的位置，也不会使用 Tree-sitter 伪造额外结果。
+
+Pyrefly 自身只在 query 至少有 3 个字符时执行 workspace-symbol 搜索；空文本、1 个字符或 2 个字符会返回空结果。cgraph 仍按统一节奏发送完整 LSP Query，不在 UI 中制造额外门槛，也不会为 server 未返回的内容伪造候选。Pyrefly 默认的后台索引模式声明标准 call/type hierarchy；使用 `--indexing-mode none` 会由 server 关闭这些能力。Pyrefly hierarchy 中能够确认的方法按 `Class.method` 显示，模块函数保持原名。
 
 为触发 Pyrefly 的 lazy workspace index，cgraph 会只读打开一个受限大小的项目 Python 文件，并在 LSP shutdown 前关闭它；不会发送 change 或 save。文件发现会跳过隐藏目录、构建目录、虚拟环境、依赖目录和符号链接。若项目内没有安全可读的 `.py` 文件，LSP 连接仍会建立，但首次符号查询可能为空。
 

@@ -21,6 +21,10 @@ pub struct Cli {
     )]
     pub lsp_args: Vec<OsString>,
 
+    /// Override the default /tmp language-server stderr log path.
+    #[arg(long, global = true, value_name = "PATH", conflicts_with = "no_lsp")]
+    pub lsp_log: Option<PathBuf>,
+
     /// Workspace directory supplied to the language server.
     #[arg(long, global = true, value_name = "PATH", default_value = ".")]
     pub workspace: PathBuf,
@@ -107,6 +111,16 @@ mod tests {
         assert_eq!(
             cli.ipc_socket.as_deref(),
             Some(std::path::Path::new("/run/user/1000/cgraph.sock"))
+        );
+    }
+
+    #[test]
+    fn parses_an_lsp_diagnostic_log_path() {
+        let cli = Cli::try_parse_from(["cgraph", "--lsp-log", ".cgraph-clangd.log"]).unwrap();
+
+        assert_eq!(
+            cli.lsp_log.as_deref(),
+            Some(std::path::Path::new(".cgraph-clangd.log"))
         );
     }
 }

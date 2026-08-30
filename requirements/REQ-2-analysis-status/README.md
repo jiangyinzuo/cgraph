@@ -17,6 +17,7 @@
 | [REQ-2-1 LSP 状态与进度](REQ-2-1-lsp-progress.md) | `Implemented` | 标准 progress、rust-analyzer 状态和断开 |
 | [REQ-2-2 Tree-sitter 状态](REQ-2-2-tree-sitter-status.md) | `Implemented` | 初始化、就绪与失败状态 |
 | [REQ-2-3 底部状态栏布局](REQ-2-3-status-window.md) | `Implemented` | 快捷键与后端状态同栏展示 |
+| [REQ-2-4 LSP 诊断与日志](REQ-2-4-lsp-diagnostics.md) | `Implemented` | 空查询统计、启动信息和 stderr 文件 |
 
 ## 父需求验收
 
@@ -27,7 +28,8 @@
 - 普通信息和错误统一进入消息历史，并在倒数第二行显示最新摘要；最底行快捷键与分析状态始终保留。
 - 消息 pager 从倒数第二行向上最多显示 15 行，支持行、整页、半页、首尾滚动以及 `V` 选择、`y` OSC 52 复制，并用 `q` / `Esc` 返回画布。
 - pager 打开时终端接管鼠标文本选择，关闭后恢复 Canvas 鼠标捕获；OSC 52 复制依赖终端能力。
+- LSP 启动元数据与空 workspace-symbol 查询统计进入消息历史，server stderr 默认写入受限权限的 `/tmp` 会话日志。
 
 ## 当前实现与差距
 
-LSP progress、统一底部状态栏和 Tree-sitter fallback 状态均已交付。Tree-sitter 会初始化对应 grammar 与 tags query，Ready 消息说明项目静态索引在第一次查询时建立；搜索 modal/分支 loading 表示单次工作，hierarchy 完成后的消息摘要明确说明语法级置信度。所有操作信息和错误进入统一历史，摘要位于倒数第二行；`g<` 打开纯 Ratatui pager，提供接近 `less` 的滚动、行选择和复制，同时保持最底行快捷键可见。
+LSP progress、统一底部状态栏、诊断日志和 Tree-sitter fallback 状态均已交付。Tree-sitter 会初始化对应 grammar 与 tags query，Ready 消息说明项目静态索引在第一次查询时建立；搜索 modal/分支 loading 表示单次工作，hierarchy 完成后的消息摘要明确说明语法级置信度。所有操作信息、诊断和错误进入统一历史，摘要位于倒数第二行；`g<` 打开纯 Ratatui pager，提供接近 `less` 的滚动、行选择和复制，同时保持最底行快捷键可见。
