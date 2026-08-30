@@ -12,32 +12,31 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
-use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream, unix::OwnedWriteHalf},
+    net::UnixListener,
     runtime::Handle,
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
 
 use crate::{
-    ipc::protocol::{Envelope, IpcEvent, IpcRequest, IpcResponse, PROTOCOL_VERSION},
+    ipc::protocol::{IpcEvent, IpcRequest, IpcResponse},
     state::SourceLocation,
 };
 
+mod connection;
 pub mod protocol;
 mod socket;
 
+#[cfg(test)]
+use connection::MAX_FRAME_BYTES;
+use connection::{encode_frame, spawn_client_connection};
 use socket::{
     SocketGuard, prepare_socket_path, remove_socket_if_identity_matches, socket_identity,
     validate_socket_parent,
 };
 
-const CLIENT_QUEUE_CAPACITY: usize = 16;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
-const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct IpcEventSender {
@@ -242,17 +241,14 @@ async fn run_server(
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
-                let (sender, receiver) = mpsc::channel(CLIENT_QUEUE_CAPACITY);
-                clients.insert(client_id, sender.clone());
-                client_count.store(clients.len(), Ordering::Release);
-                spawn_client_connection(
+                let sender = spawn_client_connection(
                     client_id,
                     stream,
-                    sender,
-                    receiver,
                     command_sender.clone(),
                     disconnected_sender.clone(),
                 );
+                clients.insert(client_id, sender);
+                client_count.store(clients.len(), Ordering::Release);
             }
             Some(event) = event_receiver.recv() => {
                 let frame = encode_frame(None, event)?;
@@ -270,154 +266,6 @@ async fn run_server(
     clients.clear();
     client_count.store(0, Ordering::Release);
     Ok(())
-}
-
-fn spawn_client_connection(
-    client_id: u64,
-    stream: UnixStream,
-    response_sender: mpsc::Sender<Arc<[u8]>>,
-    receiver: mpsc::Receiver<Arc<[u8]>>,
-    command_sender: mpsc::Sender<IpcCommand>,
-    disconnected_sender: mpsc::UnboundedSender<u64>,
-) {
-    let _connection_task = tokio::spawn(async move {
-        let (reader, writer) = stream.into_split();
-        let read = read_client_requests(reader, response_sender, command_sender);
-        let mut writer_task = tokio::spawn(write_client_frames(writer, receiver));
-        tokio::pin!(read);
-        tokio::select! {
-            _ = &mut read => {
-                let _ = disconnected_sender.send(client_id);
-                let _ = writer_task.await;
-            }
-            _ = &mut writer_task => {
-                let _ = disconnected_sender.send(client_id);
-            }
-        }
-    });
-}
-
-async fn read_client_requests(
-    reader: tokio::net::unix::OwnedReadHalf,
-    response_sender: mpsc::Sender<Arc<[u8]>>,
-    command_sender: mpsc::Sender<IpcCommand>,
-) -> io::Result<()> {
-    let mut reader = BufReader::new(reader);
-    loop {
-        let mut frame = Vec::new();
-        let bytes_read = (&mut reader)
-            .take((MAX_FRAME_BYTES + 1) as u64)
-            .read_until(b'\n', &mut frame)
-            .await?;
-        if bytes_read == 0 {
-            return Ok(());
-        }
-        if frame.len() > MAX_FRAME_BYTES {
-            send_protocol_error(&response_sender, None, "IPC frame exceeds 1 MiB").await?;
-            return Ok(());
-        }
-        if frame.last() != Some(&b'\n') {
-            send_protocol_error(&response_sender, None, "IPC frame must end with a newline")
-                .await?;
-            return Ok(());
-        }
-        frame.pop();
-        if frame.last() == Some(&b'\r') {
-            frame.pop();
-        }
-
-        let envelope: Envelope<Value> = match serde_json::from_slice(&frame) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                send_protocol_error(
-                    &response_sender,
-                    None,
-                    &format!("invalid IPC JSON: {error}"),
-                )
-                .await?;
-                continue;
-            }
-        };
-        if envelope.version != PROTOCOL_VERSION {
-            send_protocol_error(
-                &response_sender,
-                envelope.request_id,
-                &format!(
-                    "unsupported IPC protocol version {}; expected {}",
-                    envelope.version, PROTOCOL_VERSION
-                ),
-            )
-            .await?;
-            continue;
-        }
-        let Some(request_id) = envelope.request_id else {
-            send_protocol_error(&response_sender, None, "IPC requests require a request_id")
-                .await?;
-            continue;
-        };
-        let request = match serde_json::from_value(envelope.payload) {
-            Ok(request) => request,
-            Err(error) => {
-                send_protocol_error(
-                    &response_sender,
-                    Some(request_id),
-                    &format!("invalid IPC request: {error}"),
-                )
-                .await?;
-                continue;
-            }
-        };
-        let responder = IpcResponder {
-            request_id,
-            sender: response_sender.clone(),
-        };
-        if command_sender
-            .send(IpcCommand::new(request_id, request, responder))
-            .await
-            .is_err()
-        {
-            send_protocol_error(
-                &response_sender,
-                Some(request_id),
-                "cgraph command loop is no longer available",
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-}
-
-async fn write_client_frames(
-    mut writer: OwnedWriteHalf,
-    mut receiver: mpsc::Receiver<Arc<[u8]>>,
-) -> io::Result<()> {
-    while let Some(frame) = receiver.recv().await {
-        writer.write_all(&frame).await?;
-    }
-    Ok(())
-}
-
-async fn send_protocol_error(
-    sender: &mpsc::Sender<Arc<[u8]>>,
-    request_id: Option<u64>,
-    message: &str,
-) -> io::Result<()> {
-    sender
-        .send(encode_frame(
-            request_id,
-            IpcResponse::Error {
-                message: message.to_owned(),
-            },
-        )?)
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "IPC client disconnected"))
-}
-
-fn encode_frame<T: Serialize>(request_id: Option<u64>, payload: T) -> io::Result<Arc<[u8]>> {
-    let mut frame =
-        serde_json::to_vec(&Envelope::new(request_id, payload)).map_err(io::Error::other)?;
-    frame.push(b'\n');
-    Ok(Arc::from(frame))
 }
 
 #[cfg(test)]

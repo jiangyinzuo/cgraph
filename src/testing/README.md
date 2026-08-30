@@ -202,7 +202,7 @@ Tree-sitter 测试创建临时工作区，实际初始化 Rust、C、C++、Pytho
 
 ### IPC socket 集成测试
 
-IPC 测试绑定真实临时 Unix socket，并使用两个真实 `tokio::net::UnixStream` 客户端逐行读取生产 actor 写出的数据，而不是直接调用 serde helper。核心断言包括：
+IPC 测试绑定真实临时 Unix socket，并使用两个真实 `tokio::net::UnixStream` 客户端逐行读取生产 server actor 与 `connection.rs` writer 写出的数据，而不是直接调用 serde helper。测试仍从公开 `IpcServer` 边界进入，以同时覆盖 socket 生命周期、客户端集合、单连接 framing 和有界 channel 拼装。核心断言包括：
 
 - socket 权限为 `0600`，两个客户端收到完全相同的版本化 NDJSON `open_location`，行和 UTF-16 character 保持零基。
 - 零客户端发送返回可诊断错误；每客户端独立 writer/有界队列不会把同步 TUI 绑定到 socket I/O。

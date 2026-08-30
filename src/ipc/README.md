@@ -4,6 +4,8 @@
 
 IPC 层通过 Unix domain socket 连接 Neovim 等客户端。调用方用 `--ipc-socket <PATH>` 显式选择实例路径；不传选项时不创建 socket。显式路径比隐式 workspace hash 更容易被编辑器可靠发现，也避免在还没有实例注册表时猜测多 workspace / 多进程路由。
 
+实现按变化原因分为三层：`mod.rs` 暴露 typed command/event/responder 和 `IpcServer` 生命周期，并在 server actor 中维护客户端集合与广播背压；`connection.rs` 独占单连接 NDJSON framing、协议校验、reader/writer supervisor 和错误响应排空；`socket.rs` 负责父目录校验、ownership marker、陈旧 socket 判定及 inode 安全清理。`protocol.rs` 只定义稳定 envelope 与 payload。连接任务不能访问 App、Ratatui 或 socket ownership，server actor 也不解析 JSON 帧。
+
 未来 IPC 也可能承载 workspace daemon，让多个短生命周期 TUI 复用同一个 rust-analyzer；该方案的实例身份、请求路由和文档状态要求记录在 [rust-analyzer 生命周期与索引复用设计](../fetch/rust-analyzer.md)。当前决策仍是每个 cgraph 启动自己的语言服务器。
 
 ## 方向
