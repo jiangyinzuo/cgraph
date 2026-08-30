@@ -90,12 +90,12 @@ cgraph --lsp pyrefly --lsp-arg=--indexing-mode --lsp-arg=lazy-blocking
 | --- | --- |
 | `LSP: <server>` | 当前连接的语言服务器名称 |
 | `Tree-sitter: <language>` | LSP 不可用时初始化的 Tree-sitter grammar/query |
-| `Backend: none` | 没有可用分析后端 |
+| `Backend: none` | 正在选择后备，或最终没有可用分析后端 |
 | `Ready` | 后端已经建立连接，当前没有已知后台任务 |
 | `Working [N%]` | 后端报告正在加载、索引或执行任务；百分比仅在后端提供时显示 |
-| `Warning` / `Error` | 后端报告需要注意或失败的状态，后面附带详情 |
+| `Warning` / `Error` | 后端报告需要注意或失败的状态；只有所有启动路径均不可用时才把启动降级标记为 Error |
 | `Disconnected` | 已建立的 LSP 连接已经关闭或异常退出 |
-| `Inactive` | 没有 LSP，且工作区未检测到支持的 Tree-sitter 语言 |
+| `Inactive` | 尚未选定后端，例如正在从缺失或失败的 LSP 转向 Tree-sitter 检测 |
 
 状态摘要展示分析后端的全局状态，不等同于搜索弹窗的单次查询状态。终端较窄或消息较长时，整行按可用宽度自然裁剪，不会另行覆盖画布。
 

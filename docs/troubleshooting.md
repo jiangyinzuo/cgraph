@@ -27,7 +27,7 @@ command = "/usr/bin/clangd"
 args = []
 ```
 
-cgraph 会把 LSP 启动/initialize 或 Tree-sitter 初始化错误显示在状态栏和搜索框中。LSP 初始化摘要会记录 server 版本、workspace、bootstrap 文档和 stderr 日志路径，按 `g<` 查看。server stderr 默认保存在 `/tmp/cgraph-<server>-<pid>.log`；也可用 `--lsp-log /path/to/file` 或 `[lsp].log_file` 覆盖。需要绕过损坏或缺失的 LSP 时，可以使用 `--no-lsp` 强制尝试 Tree-sitter 回退。
+cgraph 会把 LSP 启动/initialize 失败详情写入消息 pager，然后继续尝试 Tree-sitter。静态后备成功时底栏以 `Tree-sitter: <language> · Ready` 为准，先前的 LSP 失败不会残留为当前 ERROR；只有 LSP 与 Tree-sitter 都不可用，或 Tree-sitter 初始化失败时，搜索框和状态栏才显示最终错误。LSP 初始化摘要会记录 server 版本、workspace、bootstrap 文档和 stderr 日志路径，按 `g<` 查看。server stderr 默认保存在 `/tmp/cgraph-<server>-<pid>.log`；也可用 `--lsp-log /path/to/file` 或 `[lsp].log_file` 覆盖。需要绕过损坏或缺失的 LSP 时，可以使用 `--no-lsp` 强制尝试 Tree-sitter 回退。
 
 ## 搜索一直为空
 
@@ -91,7 +91,7 @@ cargo run --example lsp_hierarchy -- rust-analyzer call outgoing main /path/to/p
 - `Warning` 或 `Error` 时先阅读状态后附带的消息；终端过窄时按 `g<` 查看完整历史，并检查初始化摘要给出的 `/tmp` stderr 日志。
 - `Disconnected` 表示 LSP 通道已经结束。当前版本不会自动重启 server；退出后重新运行 cgraph，并用显式 `--lsp` 检查是否可复现。
 - `Tree-sitter: <language> · Ready` 表示 grammar 和 tags query 已初始化；第一次搜索或展开会惰性建立项目静态索引。展开后的 `syntactic relations only` 提示表示动态、歧义或项目外关系可能省略。
-- `Backend: none · Inactive` 表示没有 LSP，且工作区未检测到 Rust、C、C++ 或 Python 的 Tree-sitter 标志。
+- `Backend: none · Error` 表示启动流程已经确认 LSP 与 Tree-sitter 均不可用；完整原因位于状态详情和 `g<` 消息历史。`Backend: none · Inactive` 只用于仍在选择后备的短暂阶段。
 
 快捷键和状态始终共用最底部一行，状态紧跟快捷键提示。终端较窄时整行从右侧自然截断，不代表快捷键或后端被关闭；扩大终端可看到完整状态摘要。
 

@@ -6,7 +6,7 @@ cgraph 以 LSP 客户端身份启动一个通过 stdin/stdout 通信的语言服
 
 TUI 最底栏右侧的状态摘要展示该会话的连接和后台进度，左侧同时保留快捷键提示。它与 `ac` / `at` 搜索弹窗中的单次查询状态分开维护。
 
-如果没有检测到 LSP、显式使用 `--no-lsp`，或 LSP 启动失败，cgraph 会尝试根据工作区浅层标志初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar 和 tags query。成功时底栏显示 `Tree-sitter: <language> · Ready`；初始化失败显示 Error。LSP 正常运行时也会初始化同语言的轻量 hierarchy 后备，但不会替代底栏中的 LSP 主状态，也不会提前扫描项目。第一次实际使用 Tree-sitter 搜索或 hierarchy 回退时才在 blocking task 中惰性建立项目静态索引，后续查询复用该索引。
+如果没有检测到 LSP、显式使用 `--no-lsp`，或 LSP 启动失败，cgraph 会尝试根据工作区浅层标志初始化 Rust、C、C++ 或 Python 的 Tree-sitter grammar 和 tags query。LSP 启动失败但仍可尝试静态后备时，失败详情只作为普通消息进入 pager，不会提前把整个分析功能标记为 Error；Tree-sitter 成功后底栏显示 `Tree-sitter: <language> · Ready`。只有 LSP 与 Tree-sitter 最终都不可用，或 Tree-sitter 初始化本身失败时，才显示最终 Error。LSP 正常运行时也会初始化同语言的轻量 hierarchy 后备，但不会替代底栏中的 LSP 主状态，也不会提前扫描项目。第一次实际使用 Tree-sitter 搜索或 hierarchy 回退时才在 blocking task 中惰性建立项目静态索引，后续查询复用该索引。
 
 ## 自动检测
 

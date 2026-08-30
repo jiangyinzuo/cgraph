@@ -16,10 +16,10 @@
 
 ## 自动化清单
 
-当前共有 **146 个自动化测试**，其中 145 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
+当前共有 **149 个自动化测试**，其中 148 个验证产品代码，1 个验证本测试总账与源码注解保持一致。
 
 <!-- test-inventory
-src/app.rs: 20
+src/app.rs: 21
 src/app/config.rs: 2
 src/app/fuzzy.rs: 2
 src/app/save.rs: 1
@@ -34,7 +34,8 @@ src/fetch/lsp/symbol_names.rs: 5
 src/fetch/treesitter.rs: 9
 src/ipc/tests.rs: 5
 src/ipc/protocol.rs: 2
-src/main.rs: 5
+src/main.rs: 4
+src/startup.rs: 3
 src/state/graph.rs: 9
 src/tui/canvas/connections.rs: 4
 src/tui/config_editor.rs: 2
@@ -44,12 +45,12 @@ src/tui/mod.rs: 31
 src/tui/save.rs: 2
 src/tui/search.rs: 4
 tests/test_documentation.rs: 1
-total: 146
+total: 149
 -->
 
 | 位置 | 数量 | 类型 | 主要覆盖 |
 | --- | ---: | --- | --- |
-| `src/app.rs` | 20 | 状态机单元测试 | 搜索生命周期、完整 LSP Query、三栏焦点循环、Symbol/URI 缓存过滤、空查询、Unicode 路径匹配、项目符号过滤、模糊排序、根管理、hierarchy 加载/缓存/刷新/去重/竞态、Tree-sitter 提示和外部聚焦 |
+| `src/app.rs` | 21 | 状态机单元测试 | 搜索生命周期、完整 LSP Query、三栏焦点循环、Symbol/URI 缓存过滤、空查询、Unicode 路径匹配、项目符号过滤、模糊排序、根管理、hierarchy 加载/缓存/刷新/去重/竞态、分析错误恢复、Tree-sitter 提示和外部聚焦 |
 | `src/app/config.rs` | 2 | 配置重载状态机测试 | 全部成功空/已加载/正在刷新分支、新 request id、跨路径/符号命名空间的有序过滤、anchor 保留与迟到结果拒绝 |
 | `src/app/fuzzy.rs` | 2 | 模糊匹配适配器单元测试 | 通过 `nucleo-matcher` 验证 Unicode 子序列和忽略输入空白的单序列匹配 |
 | `src/app/save.rs` | 1 | 保存状态单元测试 | 路径编辑、错误保留与再次编辑恢复 |
@@ -64,7 +65,8 @@ total: 146
 | `src/fetch/treesitter.rs` | 9 | 文件系统与静态索引集成测试 | 语言检测、四种 grammar、Rust/Python/C/C++ 符号与调用、Rust/C++/Python 类型关系、限定方法名、UTF-16 列归一化、目录排除、歧义拒绝和取消安全的单次索引 |
 | `src/ipc/tests.rs` | 5 | Unix socket 异步集成测试 | 私有父目录、`0600` 权限、多客户端广播、请求路由与相同 request id 响应、版本拒绝、1 MiB 入站限制、陈旧 socket 回收和 inode 保护 |
 | `src/ipc/protocol.rs` | 2 | 序列化契约测试 | 版本化 tagged request、无 request id 的 UTF-16 零基打开位置事件 |
-| `src/main.rs` | 5 | 组装/降级测试 | Python 默认 Pyrefly、显式 pylsp 覆盖、项目 `[lsp]` 命令/扩展名/日志覆盖、默认 `/tmp` 日志命名、C/C++ 源文件和头文件自动检测、Tree-sitter fallback 与统一状态 |
+| `src/main.rs` | 4 | 启动配置测试 | Python 默认 Pyrefly、显式 pylsp 覆盖、项目 `[lsp]` 命令/扩展名/日志覆盖、默认 `/tmp` 日志命名，以及 C/C++ 源文件和头文件自动检测 |
+| `src/startup.rs` | 3 | Provider 组装/降级测试 | 无 LSP 的可查询 Tree-sitter fallback、LSP 启动失败后的无错误降级，以及全部 provider 不可用时的最终 Error |
 | `src/state/graph.rs` | 9 | 图领域模型单元测试 | 菱形全局去重、双向边观察、循环、自环、身份解析、边迁移、共享边清除、可见/已知图投影 |
 | `src/tui/canvas/connections.rs` | 4 | 连线几何与渲染单元测试 | 正交圆角、真实普通交叉高亮、单/双线 `╪` / `╫` 轴向语义、极远线段先裁剪后栅格化 |
 | `src/tui/config_editor.rs` | 2 | 外部进程与选择单元测试 | `$EDITER` 优先、`$EDITOR` 回退、缺失诊断、真实子进程收到准确配置路径和最小模板 |
@@ -140,7 +142,7 @@ Tree-sitter 测试创建真实临时工作区，经生产代码递归发现文�
 - 首个搜索等待任务在构建中被取消后，后台索引继续完成，下一请求复用同一次扫描。
 - 非 ASCII 行前缀的 Tree-sitter UTF-8 byte column 会归一化为公共 UTF-16 character。
 
-启动层测试再经过 `start_tree_sitter_fallback` 获取真实 provider client，证明没有 LSP 时不仅状态为 Ready，workspace symbol 与 hierarchy 也实际可查询。动态分派等静态未知关系无法通过 fixture 证明“完整”，因此另由 App 测试断言用户始终看到语法级置信度提示。
+启动层测试经过完整的 `start_analysis_providers` 流程获取真实 provider client，证明没有 LSP 时不仅状态为 Ready，workspace symbol 与 hierarchy 也实际可查询；另以不存在的 LSP 可执行文件验证 Python Tree-sitter 成功接管且不残留 ERROR，并以空工作区验证只有全部 provider 不可用时才产生最终错误。动态分派等静态未知关系无法通过 fixture 证明“完整”，因此另由 App 测试断言用户始终看到语法级置信度提示。
 
 ### TUI 输入测试
 
@@ -194,7 +196,7 @@ Ratatui `TestBackend` 提供虚拟终端 Buffer。测试调用完整 `render()`�
 
 ### 文件系统与组装测试
 
-Tree-sitter 测试创建临时工作区，实际初始化 Rust、C、C++、Python grammar/query 并解析项目源码。启动层测试通过临时 Python 工作区验证没有 LSP 时的 fallback、`AnalysisStatus` 映射和可查询 client 组装。
+Tree-sitter 测试创建临时工作区，实际初始化 Rust、C、C++、Python grammar/query 并解析项目源码。启动层测试通过临时 Python 与空工作区验证没有 LSP 时的 fallback、失败 LSP 的消息降级、全部 provider 不可用时的最终 Error、`AnalysisStatus` 映射和可查询 client 组装。
 
 临时目录必须使用唯一名称，测试结束后删除；测试内容不得依赖开发者真实工作区。
 

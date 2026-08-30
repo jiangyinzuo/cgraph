@@ -24,6 +24,7 @@
 - 状态模型不依赖具体后端协议。
 - LSP 连接与后台进度可以被用户观察。
 - LSP 不可用且能够检测语言时，Tree-sitter 通过同一底栏报告初始化、就绪或失败。
+- LSP 启动失败但 Tree-sitter 成功时，失败详情进入消息历史，当前状态不得残留 Error；只有所有 provider 都不可用时才报告最终 Error。
 - 全局后端状态与单次 workspace symbol 查询状态保持独立。
 - 普通信息和错误统一进入消息历史，并在倒数第二行显示最新摘要；最底行快捷键与分析状态始终保留。
 - 消息 pager 从倒数第二行向上最多显示 15 行，支持行、整页、半页、首尾滚动以及 `V` 选择、`y` OSC 52 复制，并用 `q` / `Esc` 返回画布。
@@ -32,4 +33,4 @@
 
 ## 当前实现与差距
 
-LSP progress、统一底部状态栏、诊断日志和 Tree-sitter fallback 状态均已交付。Tree-sitter 会初始化对应 grammar 与 tags query，Ready 消息说明项目静态索引在第一次查询时建立；搜索 modal/分支 loading 表示单次工作，hierarchy 完成后的消息摘要明确说明语法级置信度。所有操作信息、诊断和错误进入统一历史，摘要位于倒数第二行；`g<` 打开纯 Ratatui pager，提供接近 `less` 的滚动、行选择和复制，同时保持最底行快捷键可见。
+LSP progress、统一底部状态栏、诊断日志和 Tree-sitter fallback 状态均已交付。Tree-sitter 会初始化对应 grammar 与 tags query，Ready 消息说明项目静态索引在第一次查询时建立；搜索 modal/分支 loading 表示单次工作，hierarchy 完成后的消息摘要明确说明语法级置信度。Provider 启动状态由独立启动模块统一收敛：可恢复的 LSP 失败作为普通消息保留，Tree-sitter 成功会清除旧错误，只有所有路径失败才提交最终 Error。所有操作信息、诊断和错误进入统一历史，摘要位于倒数第二行；`g<` 打开纯 Ratatui pager，提供接近 `less` 的滚动、行选择和复制，同时保持最底行快捷键可见。

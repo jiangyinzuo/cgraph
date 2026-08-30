@@ -168,6 +168,7 @@ mod tests {
 
     use super::{App, SearchField, SearchItem, SearchKind, SearchStatus};
     use crate::{
+        app::{AnalysisPhase, AnalysisStatus},
         cli::Cli,
         config::FilterConfig,
         fetch::{CachePolicy, FetchSource, HierarchyResponse},
@@ -175,6 +176,28 @@ mod tests {
             HierarchyDirection, HierarchyKind, LoadState, NodeId, SourceLocation, SymbolIdentity,
         },
     };
+
+    #[test]
+    fn ready_analysis_clears_a_stale_backend_error() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
+        app.set_analysis_status(AnalysisStatus::unavailable("no provider"));
+        assert!(app.canvas_notice_is_error());
+
+        app.set_analysis_status(AnalysisStatus::tree_sitter("Python", AnalysisPhase::Ready));
+
+        assert!(!app.canvas_notice_is_error());
+        assert!(app.canvas_notice.is_none());
+        assert_eq!(app.message_history, ["no provider"]);
+        app.open_search(SearchKind::Call, false);
+        assert_eq!(
+            app.search.as_ref().unwrap().status,
+            SearchStatus::Error("No workspace-symbol provider is available".to_owned())
+        );
+        assert_eq!(
+            app.message_history.last().map(String::as_str),
+            Some("Workspace symbol search unavailable: No workspace-symbol provider is available")
+        );
+    }
 
     #[test]
     fn lsp_field_queries_on_open_and_sends_its_complete_text() {

@@ -8,7 +8,7 @@
 
 | 模块 | 主要需求 |
 | --- | --- |
-| `main.rs` / `cli.rs` | [REQ-1 会话与启动](../requirements/REQ-1-session/README.md)、[REQ-8 语言支持](../requirements/REQ-8-language-support/README.md) |
+| `main.rs` / `startup.rs` / `cli.rs` | [REQ-1 会话与启动](../requirements/REQ-1-session/README.md)、[REQ-2 分析后端状态](../requirements/REQ-2-analysis-status/README.md)、[REQ-8 语言支持](../requirements/REQ-8-language-support/README.md) |
 | `config/` | [REQ-9 项目本地配置与符号过滤](../requirements/REQ-9-project-configuration/README.md) |
 | `app.rs` / `state/` | [REQ-3 层次关系探索](../requirements/REQ-3-hierarchy/README.md)、[REQ-4 画布与导航](../requirements/REQ-4-canvas-navigation/README.md)、[REQ-5 符号与图入口管理](../requirements/REQ-5-symbol-management/README.md) |
 | `fetch/` | [REQ-2 分析后端状态](../requirements/REQ-2-analysis-status/README.md)、[REQ-3 层次关系探索](../requirements/REQ-3-hierarchy/README.md)、[REQ-5 符号与图入口管理](../requirements/REQ-5-symbol-management/README.md) |
@@ -22,7 +22,8 @@
 
 | 模块 | 当前职责 | 不应承担的职责 |
 | --- | --- | --- |
-| `main.rs` | 组装 CLI、语言服务器、App 和终端生命周期 | 保存交互状态、解析 LSP 消息 |
+| `main.rs` | 组装 CLI、分析 provider、App 和终端生命周期 | 决定 provider 降级状态、保存交互状态、解析 LSP 消息 |
+| `startup.rs` | 启动 LSP、选择 Tree-sitter 后备并提交最终分析状态 | 解析命令行、进入终端事件循环、执行符号查询 |
 | `cli.rs` | 命令行语法和启动配置 | 自动修改 App、启动外部进程 |
 | `config/` | 读取并校验 workspace 根目录的 `.cgraph.toml` | 查询 LSP、修改关系图或渲染错误弹窗 |
 | `app.rs` / `app/` | UI 无关的交互状态组合；`search`、`hierarchy`、`analysis`、`messages`、`config`、`save` 分别维护各自状态迁移 | 直接读终端、直接发送 JSON-RPC |
@@ -35,7 +36,7 @@
 ## 当前数据流
 
 ```text
-CLI ──> main ──> project config ──> App
+CLI ──> main ──> project config ──> startup ──> App
                │
 terminal event ├──> App state transition ──> render
                ├──> ec ──> restore terminal ──> $EDITER ──> reload config ──> graph refresh
@@ -50,11 +51,11 @@ editor clients ──> IPC readers ──> bounded command channel ──> App
 language server ──> progress/status notification ──> AnalysisStatus ──> render
 ```
 
-`main` 拥有 `LspProvider` 或 `TreeSitterProvider`。TUI 只收到 Fetch 顶层可克隆的 `WorkspaceSymbolClient` 与 `HierarchyClient`，既不能关闭语言服务器，也不认识 Tree-sitter parser/index。这一拆分可以防止短生命周期查询任务意外终止 LSP 会话，并保证两种 Tree-sitter 查询复用一次索引。
+`main` 持有 `startup` 返回的 `LspProvider` 或 `TreeSitterProvider`。`startup` 只有在 LSP 和静态后备都不可用时才提交最终 Error；LSP 启动失败但 Tree-sitter 成功时，失败详情仅作为普通历史消息保留，当前状态恢复为 Tree-sitter Ready。TUI 只收到 Fetch 顶层可克隆的 `WorkspaceSymbolClient` 与 `HierarchyClient`，既不能关闭语言服务器，也不认识 Tree-sitter parser/index。这一拆分可以防止短生命周期查询任务意外终止 LSP 会话，并保证两种 Tree-sitter 查询复用一次索引。
 
 IPC server 同样不持有 App。每连接 reader 完成 framing 和协议验证后，只把 typed command 与 responder 放入有界 channel；TUI 在事件循环线程调用 App，再把结构化结果送回原连接。这样 socket I/O、业务状态迁移和 Ratatui 渲染保持单向依赖。
 
-LSP actor 还拥有独立的状态通知通道。TUI 的 `status` 模块将 LSP 专用更新转换为 App 的 `AnalysisStatus`；没有可用 LSP 时，`main` 初始化 Tree-sitter grammar/query 并写入同一状态模型。全局分析状态和单次 workspace symbol 搜索状态是两个不同状态机；Tree-sitter 首次索引由查询 task 承担，搜索 modal/分支 loading 状态负责表示该次工作。终端 raw mode、备用屏幕、鼠标捕获和 OSC 52 副作用集中在 `tui/terminal.rs`，其他组件不直接操作 Crossterm 生命周期。
+LSP actor 还拥有独立的状态通知通道。TUI 的 `status` 模块将 LSP 专用更新转换为 App 的 `AnalysisStatus`；没有可用 LSP 时，`startup` 初始化 Tree-sitter grammar/query 并写入同一状态模型。全局分析状态和单次 workspace symbol 搜索状态是两个不同状态机；Tree-sitter 首次索引由查询 task 承担，搜索 modal/分支 loading 状态负责表示该次工作。终端 raw mode、备用屏幕、鼠标捕获和 OSC 52 副作用集中在 `tui/terminal.rs`，其他组件不直接操作 Crossterm 生命周期。
 
 当前每个 cgraph 进程独立启动语言服务器。rust-analyzer 的内存索引无法跨进程直接复用，以及未来 workspace daemon 的候选设计，详见 [rust-analyzer 生命周期与索引复用设计](fetch/rust-analyzer.md)。
 
@@ -63,7 +64,8 @@ LSP actor 还拥有独立的状态通知通道。TUI 的 `status` 模块将 LSP 
 期望的长期依赖方向为：
 
 ```text
-main -> cli / app / fetch / tui / ipc
+main -> startup / cli / app / fetch / tui / ipc
+startup -> app / fetch
 tui  -> app / state / fetch 的窄接口 / export
 app  -> state
 fetch -> state

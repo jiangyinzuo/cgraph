@@ -22,7 +22,7 @@ Python 工作区无需额外参数即可使用 Pyrefly 的 workspace symbol、ca
 - 没有精确位置的 Python CLI 根同时接受 `Class.method` 和通用 `Class::method` 输入，并用末级方法名解析 workspace symbol。
 - initialize 完成后，从项目内选择一个受限大小的 Python 源文件发送标准 `textDocument/didOpen`，触发 Pyrefly 的 lazy workspace index；shutdown 前发送对应的 `textDocument/didClose`，不发送 change 或 save。
 - 索引引导扫描必须跳过隐藏目录、构建目录、虚拟环境、`node_modules`、`__pycache__` 和符号链接，并限制扫描条目数与文件大小；找不到安全文件时保持 LSP 已连接，不伪造索引完成状态。
-- Pyrefly 无法启动时继续使用现有 Tree-sitter 回退，并在底栏保留可诊断错误。
+- Pyrefly 无法启动时继续使用现有 Tree-sitter 回退；失败详情进入消息历史，回退成功后底栏显示 Tree-sitter Ready，不残留当前错误状态。
 
 ## 验收条件
 

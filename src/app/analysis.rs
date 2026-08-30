@@ -57,29 +57,39 @@ impl AnalysisStatus {
             percentage: None,
         }
     }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            backend: AnalysisBackend::None,
+            phase: AnalysisPhase::Error,
+            message: Some(message.into()),
+            percentage: None,
+        }
+    }
 }
 
 impl App {
-    pub fn set_analysis_error(&mut self, error: impl Into<String>) {
-        let error = error.into();
-        self.analysis_error = Some(error.clone());
-        self.set_canvas_error(error);
-    }
-
     pub fn set_analysis_status(&mut self, status: AnalysisStatus) {
+        let message = status
+            .message
+            .as_ref()
+            .filter(|message| !message.is_empty());
         if matches!(
             status.phase,
-            AnalysisPhase::Warning | AnalysisPhase::Error | AnalysisPhase::Disconnected
-        ) && let Some(message) = status.message.as_ref()
-            && !message.is_empty()
-        {
-            if matches!(
-                status.phase,
-                AnalysisPhase::Error | AnalysisPhase::Disconnected
-            ) {
+            AnalysisPhase::Error | AnalysisPhase::Disconnected
+        ) {
+            if let Some(message) = message {
+                self.analysis_error = Some(message.clone());
                 self.set_canvas_error(message.clone());
-            } else {
-                self.set_canvas_notice(message.clone());
+            }
+        } else {
+            self.analysis_error = None;
+            if status.phase == AnalysisPhase::Warning {
+                if let Some(message) = message {
+                    self.set_canvas_notice(message.clone());
+                }
+            } else if self.canvas_notice_is_error {
+                self.clear_canvas_notice();
             }
         }
         self.analysis_status = status;
