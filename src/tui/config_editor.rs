@@ -11,7 +11,7 @@ use crate::{
     config::ProjectConfig,
 };
 
-use super::{Tui, restore, resume};
+use super::terminal::{Tui, restore, resume};
 
 pub(super) struct EditorOutcome {
     pub path: PathBuf,

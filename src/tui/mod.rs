@@ -1,27 +1,18 @@
 #![doc = include_str!("README.md")]
 
 use std::{
-    io::{self, Stdout},
     sync::mpsc::{self, Sender},
     time::{Duration, Instant},
 };
 
 use anyhow::Result;
-use crossterm::{
-    clipboard::CopyToClipboard,
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    },
-    execute,
-    terminal::{
-        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-        size as terminal_size,
-    },
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
+use crossterm::terminal::size as terminal_size;
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    Frame,
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -31,10 +22,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
 use crate::{
-    app::{
-        AnalysisBackend, AnalysisPhase, AnalysisStatus, App, HierarchyLoadRequest, SearchKind,
-        SearchRequest,
-    },
+    app::{AnalysisStatus, App, HierarchyLoadRequest, SearchKind, SearchRequest},
     fetch::{HierarchyClient, WorkspaceSymbolClient, lsp::LspStatusUpdate},
     ipc::{
         IpcCommand, IpcEventSender,
@@ -49,14 +37,17 @@ mod help;
 mod messages;
 mod save;
 mod search;
+mod status;
+mod terminal;
 
 use canvas::{
     CanvasConnections, CanvasNodePlacement, CanvasNodeWidget, canvas_layout, world_canvas_layout,
 };
 #[cfg(test)]
 use canvas::{EdgeVisualKind, placement_bounds, world_rects_overlap};
+use terminal::{copy_message_to_clipboard, set_mouse_capture};
 
-pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub use terminal::{Tui, init, restore};
 
 enum InteractionRequest {
     Search(SearchRequest),
@@ -95,45 +86,6 @@ enum NavigationDirection {
     Down,
 }
 
-pub fn init() -> Result<Tui> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
-}
-
-pub fn restore(terminal: &mut Tui) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-
-fn resume(terminal: &mut Tui) -> Result<()> {
-    enable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        EnableMouseCapture
-    )?;
-    terminal.clear()?;
-    terminal.hide_cursor()?;
-    Ok(())
-}
-
-fn set_mouse_capture(terminal: &mut Tui, enabled: bool) -> Result<()> {
-    if enabled {
-        execute!(terminal.backend_mut(), EnableMouseCapture)?;
-    } else {
-        execute!(terminal.backend_mut(), DisableMouseCapture)?;
-    }
-    Ok(())
-}
-
 pub fn run(
     terminal: &mut Tui,
     app: &mut App,
@@ -161,7 +113,7 @@ pub fn run(
         }
         if let Some(receiver) = lsp_status_receiver.as_mut() {
             while let Ok(status) = receiver.try_recv() {
-                apply_lsp_status(app, status);
+                status::apply_lsp_status(app, status);
             }
         }
         while let Ok(query_event) = query_receiver.try_recv() {
@@ -280,14 +232,6 @@ pub fn run(
     Ok(())
 }
 
-fn copy_message_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
-    execute!(
-        terminal.backend_mut(),
-        CopyToClipboard::to_clipboard_from(text)
-    )?;
-    Ok(())
-}
-
 fn apply_ipc_command(app: &mut App, command: IpcCommand) {
     let request_id = command.request_id();
     let (request, responder) = command.into_parts();
@@ -354,61 +298,6 @@ fn schedule_hierarchy(
             .map_err(|error| format!("{error:#}"));
         let _ = sender.send(HierarchyQueryEvent { request, result });
     })
-}
-
-fn apply_lsp_status(app: &mut App, update: LspStatusUpdate) {
-    let update = match update {
-        LspStatusUpdate::Diagnostic(message) => {
-            app.set_canvas_notice(message);
-            return;
-        }
-        update => update,
-    };
-    let server = match &app.analysis_status.backend {
-        AnalysisBackend::Lsp(server) => server.clone(),
-        _ => "LSP".to_owned(),
-    };
-    let status = match update {
-        LspStatusUpdate::Ready { message } => AnalysisStatus {
-            backend: AnalysisBackend::Lsp(server),
-            phase: AnalysisPhase::Ready,
-            message,
-            percentage: None,
-        },
-        LspStatusUpdate::Progress {
-            title,
-            message,
-            percentage,
-        } => AnalysisStatus {
-            backend: AnalysisBackend::Lsp(server),
-            phase: AnalysisPhase::Working,
-            message: Some(match message {
-                Some(message) => format!("{title}: {message}"),
-                None => title,
-            }),
-            percentage: percentage.map(|percentage| percentage.min(100)),
-        },
-        LspStatusUpdate::Warning(message) => AnalysisStatus {
-            backend: AnalysisBackend::Lsp(server),
-            phase: AnalysisPhase::Warning,
-            message: Some(message),
-            percentage: None,
-        },
-        LspStatusUpdate::Error(message) => AnalysisStatus {
-            backend: AnalysisBackend::Lsp(server),
-            phase: AnalysisPhase::Error,
-            message: Some(message),
-            percentage: None,
-        },
-        LspStatusUpdate::Disconnected(message) => AnalysisStatus {
-            backend: AnalysisBackend::Lsp(server),
-            phase: AnalysisPhase::Disconnected,
-            message: Some(message),
-            percentage: None,
-        },
-        LspStatusUpdate::Diagnostic(_) => unreachable!("diagnostics return before status mapping"),
-    };
-    app.set_analysis_status(status);
 }
 
 #[cfg(test)]
@@ -976,7 +865,7 @@ fn render_footer(frame: &mut Frame, area: Rect, shortcuts: String, status: &Anal
         Style::default().fg(Color::DarkGray),
     )];
     content.push(Span::styled("  │  ", Style::default().fg(Color::DarkGray)));
-    content.extend(analysis_status_line(status).spans);
+    content.extend(status::line(status).spans);
     frame.render_widget(Paragraph::new(Line::from(content)), area);
 }
 
@@ -990,52 +879,6 @@ fn canvas_heading(app: &App) -> String {
         .unwrap_or_else(|| "CALL GRAPH".to_owned())
 }
 
-fn analysis_status_line(status: &AnalysisStatus) -> Line<'static> {
-    let (backend, backend_style) = match &status.backend {
-        AnalysisBackend::Lsp(server) => {
-            (format!("LSP: {server}"), Style::default().fg(Color::Cyan))
-        }
-        AnalysisBackend::TreeSitter(language) => (
-            format!("Tree-sitter: {language}"),
-            Style::default().fg(Color::Magenta),
-        ),
-        AnalysisBackend::None => (
-            "Backend: none".to_owned(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    };
-    let (phase, phase_style) = match status.phase {
-        AnalysisPhase::Inactive => ("Inactive", Style::default().fg(Color::DarkGray)),
-        AnalysisPhase::Ready => ("Ready", Style::default().fg(Color::Green)),
-        AnalysisPhase::Working => ("Working", Style::default().fg(Color::Yellow)),
-        AnalysisPhase::Warning => ("Warning", Style::default().fg(Color::Yellow)),
-        AnalysisPhase::Error => ("Error", Style::default().fg(Color::Red)),
-        AnalysisPhase::Disconnected => ("Disconnected", Style::default().fg(Color::Red)),
-    };
-    let percentage = status
-        .percentage
-        .map(|percentage| format!(" {percentage}%"))
-        .unwrap_or_default();
-    let mut content = vec![
-        Span::styled(backend, backend_style),
-        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-        Span::styled(phase, phase_style),
-        Span::raw(percentage),
-    ];
-    if let Some(message) = status
-        .message
-        .as_ref()
-        .filter(|message| !message.is_empty())
-    {
-        content.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
-        content.push(Span::styled(
-            message.clone(),
-            Style::default().fg(Color::DarkGray),
-        ));
-    }
-    Line::from(content)
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -1046,11 +889,12 @@ mod tests {
     use tower_lsp::lsp_types::{SymbolKind, Url};
 
     use super::messages;
+    use super::status::apply_lsp_status;
     use super::{
         CanvasDragState, EdgeVisualKind, InteractionRequest, NavigationDirection,
-        apply_ipc_command, apply_lsp_status, canvas_heading, canvas_inner_area, canvas_layout,
-        handle_canvas_key, handle_canvas_mouse, move_canvas_selection, placement_bounds,
-        rect_center, render, render_with_messages,
+        apply_ipc_command, canvas_heading, canvas_inner_area, canvas_layout, handle_canvas_key,
+        handle_canvas_mouse, move_canvas_selection, placement_bounds, rect_center, render,
+        render_with_messages,
         search::{search_item, symbol_matches_search},
         send_open_location, with_stable_node_position, world_canvas_layout, world_rects_overlap,
     };
