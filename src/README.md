@@ -28,7 +28,7 @@
 | `app.rs` / `app/` | UI 无关的交互状态组合；`search`、`hierarchy`、`analysis`、`messages`、`config`、`save` 分别维护各自状态迁移 | 直接读终端、直接发送 JSON-RPC |
 | `state/` | 关系图、语义身份、anchor、规范边和分支缓存 | 渲染样式、进程管理 |
 | `fetch/` | LSP/Tree-sitter 查询、协议适配和数据归一化 | 决定节点在画布上的坐标 |
-| `tui/` | 事件与组件编排；search/save/help 分离弹窗，config editor 管理终端挂起，canvas 分离布局与连线 | 持有语言服务器子进程、定义缓存语义 |
+| `tui/` | 同步事件循环与组件编排；input 解释 interaction，view 组合顶层渲染，各 modal、终端副作用、布局和连线分别维护 | 持有语言服务器子进程、定义缓存语义 |
 | `ipc/` | Unix socket 生命周期和外部消息协议 | 直接修改终端组件 |
 | `export/` | 把已知可达关系稳定序列化，并安全创建新文件 | 读取终端输入、覆盖已有目标 |
 

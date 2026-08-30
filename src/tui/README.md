@@ -2,7 +2,7 @@
 
 TUI 层把终端事件转换为 App 状态迁移，并把 App 渲染为 Ratatui widgets。业务不变量应尽量留在 App/State，TUI 只处理输入语义、坐标映射和视觉表现。
 
-代码按变化原因拆分：`mod.rs` 保存事件循环、画布键鼠控制器和顶层渲染编排；`terminal.rs` 独占 raw mode、备用屏幕、鼠标捕获与 OSC 52；`status.rs` 负责 LSP 状态到 App 状态的映射及 footer 表示；`search.rs` 集中搜索防抖查询、输入、鼠标映射与弹窗渲染；`save.rs` 负责保存弹窗；`help.rs` 维护完整帮助内容、滚动和渲染；`config_editor.rs` 选择并启动外部编辑器；`canvas.rs` 负责世界布局、viewport 投影与完整矩形碰撞，其 `canvas/connections.rs` 子模块负责连线路由和字形。这样终端副作用、分析状态、搜索、帮助、编辑器生命周期、节点布局和保存错误可以独立变化。
+代码按变化原因拆分：`mod.rs` 只协调同步事件循环、异步查询结果和外部资源；`input.rs` 把键鼠事件解释为高层 interaction，并集中维护拖拽、双击、空间导航和操作前后位置稳定；`view.rs` 组合画布、消息摘要、footer 与 modal 的顶层渲染；`terminal.rs` 独占 raw mode、备用屏幕、鼠标捕获与 OSC 52；`status.rs` 负责 LSP 状态到 App 状态的映射及 footer 表示；`search.rs` 集中搜索防抖查询、输入、鼠标映射与弹窗渲染；`save.rs` 负责保存弹窗；`help.rs` 维护完整帮助内容、滚动和渲染；`config_editor.rs` 选择并启动外部编辑器；`canvas.rs` 负责世界布局、viewport 投影与完整矩形碰撞，其 `canvas/connections.rs` 子模块负责连线路由和字形。终端副作用、输入策略、顶层视觉组合、分析状态、搜索、帮助、编辑器生命周期、节点布局和保存错误因此可以独立变化。
 
 相关产品规范：[REQ-2 分析后端状态](../../requirements/REQ-2-analysis-status/README.md)、[REQ-4 画布与导航](../../requirements/REQ-4-canvas-navigation/README.md)、[REQ-5 符号与图入口管理](../../requirements/REQ-5-symbol-management/README.md)、[REQ-6 进程间通信](../../requirements/REQ-6-ipc/README.md)、[REQ-9 项目配置](../../requirements/REQ-9-project-configuration/README.md)。本文件解释实现理由，不替代这些需求的验收条件。
 
@@ -129,4 +129,3 @@ workspace symbol 响应包含多种符号。TUI 当前根据公共候选中的 `
 - 支持粘贴事件、宽字符光标位置和超小终端降级布局。
 - 在窄终端中为分析状态提供单行降级模式，而不是只能完全隐藏。
 - 为 terminal init 中途失败增加更强的恢复守卫。
-- 把事件映射拆成可单元测试的 controller，减少 `tui/mod.rs` 体积。
