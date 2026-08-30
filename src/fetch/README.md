@@ -10,7 +10,7 @@ rust-analyzer 的进程模型、冷索引原因与未来复用路线单独记录
 
 ## Provider 与 Client Handle
 
-LSP 内部实现也按职责拆分：`lsp/profile.rs` 管理内置服务器 profile，`lsp/symbol_names.rs` 管理语言专用名称规则，`lsp/normalize.rs` 统一协议返回值的名称、位置、范围过滤和去重。`lsp.rs` 保持 provider 生命周期、查询流程和 JSON-RPC actor 的协调职责；后续扩展应遵循这一边界。
+LSP 内部实现也按职责拆分：`lsp/actor.rs` 独占 JSON-RPC 请求路由、取消、反向请求与连接失败广播；`lsp/profile.rs` 管理内置服务器 profile，`lsp/symbol_names.rs` 管理语言专用名称规则，`lsp/normalize.rs` 统一协议返回值的名称、位置、范围过滤和去重。`lsp.rs` 只组合 provider 生命周期、初始化和 symbol/hierarchy 查询流程；后续扩展应遵循这一边界。
 
 `LspProvider` 拥有语言服务器子进程、连接任务和关闭流程，不能克隆。`LspConfig::for_server` 把可执行文件转换为实际 stdio 命令；`server_name` 可显式选择语言适配 profile，适用于绝对路径或包装脚本。大多数 server 不加参数，Pyrefly profile 自动增加 `lsp` 子命令，再追加用户参数。LSP 专用 client 只持有 JSON-RPC actor 的发送端、canonical workspace root 和服务端 hierarchy 能力状态；`TreeSitterProvider` 拥有 grammar/query readiness 和共享的 single-flight 项目索引状态。Fetch 顶层的 `WorkspaceSymbolClient` / `HierarchyClient` 把实现收敛为可克隆的窄接口，TUI 不判断 provider 类型。`HierarchyClient::Hybrid` 可以在同一会话中保留 LSP 主后端与 Tree-sitter 后备，并按单次查询能力选择，而不是把整个会话强制绑定到较弱后端。
 
