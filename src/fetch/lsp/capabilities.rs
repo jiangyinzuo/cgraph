@@ -1,4 +1,8 @@
-use std::ffi::OsStr;
+use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    sync::{Mutex, atomic::AtomicBool},
+};
 
 use serde_json::{Value, json};
 use tower_lsp::lsp_types::{
@@ -6,12 +10,76 @@ use tower_lsp::lsp_types::{
     DocumentSymbolClientCapabilities, GeneralClientCapabilities, InitializeResult, OneOf,
     PositionEncodingKind, TextDocumentClientCapabilities, TypeHierarchyClientCapabilities,
     WindowClientCapabilities, WorkspaceClientCapabilities, WorkspaceSymbolClientCapabilities,
+    request::{CallHierarchyPrepare, Request, TypeHierarchyPrepare},
 };
+
+use crate::state::HierarchyKind;
 
 use super::profile::{
     ServerProfile, from_name as server_profile_from_name,
     from_program as server_profile_from_program,
 };
+
+#[derive(Debug, Default)]
+pub(super) struct ServerHierarchyCapabilities {
+    static_call: AtomicBool,
+    dynamic_registrations: Mutex<HashMap<String, String>>,
+}
+
+impl ServerHierarchyCapabilities {
+    pub(super) fn set_static_call(&self, supported: bool) {
+        self.static_call
+            .store(supported, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(super) fn supports(&self, kind: HierarchyKind) -> bool {
+        if kind == HierarchyKind::Call
+            && self.static_call.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return true;
+        }
+        let method = prepare_hierarchy_method(kind);
+        self.dynamic_registrations
+            .lock()
+            .expect("LSP hierarchy capability mutex poisoned")
+            .values()
+            .any(|registered| registered == method)
+    }
+
+    pub(super) fn register(&self, id: &str, method: &str) {
+        if is_hierarchy_registration(method) {
+            self.dynamic_registrations
+                .lock()
+                .expect("LSP hierarchy capability mutex poisoned")
+                .insert(id.to_owned(), method.to_owned());
+        }
+    }
+
+    pub(super) fn unregister(&self, id: &str) {
+        self.dynamic_registrations
+            .lock()
+            .expect("LSP hierarchy capability mutex poisoned")
+            .remove(id);
+    }
+}
+
+pub(super) fn hierarchy_name(kind: HierarchyKind) -> &'static str {
+    match kind {
+        HierarchyKind::Call => "call",
+        HierarchyKind::Type => "type",
+    }
+}
+
+fn prepare_hierarchy_method(kind: HierarchyKind) -> &'static str {
+    match kind {
+        HierarchyKind::Call => CallHierarchyPrepare::METHOD,
+        HierarchyKind::Type => TypeHierarchyPrepare::METHOD,
+    }
+}
+
+fn is_hierarchy_registration(method: &str) -> bool {
+    method == CallHierarchyPrepare::METHOD || method == TypeHierarchyPrepare::METHOD
+}
 
 pub(super) fn client_capabilities() -> ClientCapabilities {
     ClientCapabilities {
