@@ -4,7 +4,26 @@ use serde_json::{Value, from_value};
 use tokio::sync::mpsc;
 use tower_lsp::lsp_types::{NumberOrString, ProgressParams, ProgressParamsValue, WorkDoneProgress};
 
-use super::LspStatusUpdate;
+/// A provider-level status event, kept separate from individual request results.
+///
+/// Language servers may run several work-done tasks concurrently. The JSON-RPC
+/// actor collapses those protocol tokens into the most useful current update;
+/// the TUI then maps this LSP-specific type into its backend-neutral status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LspStatusUpdate {
+    Ready {
+        message: Option<String>,
+    },
+    Progress {
+        title: String,
+        message: Option<String>,
+        percentage: Option<u32>,
+    },
+    Warning(String),
+    Error(String),
+    Disconnected(String),
+    Diagnostic(String),
+}
 
 #[derive(Clone, Debug)]
 struct ActiveProgress {
