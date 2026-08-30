@@ -5,6 +5,7 @@
 
 mod capabilities;
 mod clangd;
+mod documents;
 mod framing;
 mod normalize;
 mod profile;
@@ -16,14 +17,11 @@ mod symbol_names;
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
-    fmt, fs,
+    fmt,
     fs::OpenOptions,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{
-        Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -42,12 +40,11 @@ use tokio::{
 use tower_lsp::lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    ClientInfo, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams,
-    DocumentSymbolResponse, InitializeParams, InitializeResult, PartialResultParams, Position,
-    ServerInfo, SymbolKind, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, Url, WorkDoneProgressParams, WorkspaceFolder,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    ClientInfo, DidOpenTextDocumentParams, DocumentSymbolParams, DocumentSymbolResponse,
+    InitializeParams, InitializeResult, PartialResultParams, Position, ServerInfo, SymbolKind,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Url,
+    WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams, WorkspaceSymbolResponse,
     request::{
         CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
         DocumentSymbolRequest, Initialize, Request, Shutdown, TypeHierarchyPrepare,
@@ -948,74 +945,6 @@ impl JsonRpcClient {
             .map_err(|_| anyhow::anyhow!("LSP connection closed during notification {method}"))?
             .map_err(anyhow::Error::msg)
     }
-
-    async fn mark_document_open(&self, uri: &Url) {
-        self.opened_documents.lock().await.insert(uri.clone());
-    }
-
-    fn enable_document_opening(&self) {
-        self.auto_open_documents.store(true, Ordering::Release);
-    }
-
-    async fn ensure_document_open(&self, uri: &Url) -> Result<()> {
-        if !self.auto_open_documents.load(Ordering::Acquire) || uri.scheme() != "file" {
-            return Ok(());
-        }
-        let mut opened_documents = self.opened_documents.lock().await;
-        if opened_documents.contains(uri) {
-            return Ok(());
-        }
-
-        let path = uri
-            .to_file_path()
-            .map_err(|()| anyhow::anyhow!("cannot open non-file URI {uri}"))?;
-        let Some(language_id) = language_id_for_path(&path) else {
-            return Ok(());
-        };
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read LSP document {}", path.display()))?;
-        self.notify(
-            "textDocument/didOpen",
-            DidOpenTextDocumentParams {
-                text_document: TextDocumentItem {
-                    uri: uri.clone(),
-                    language_id: language_id.to_owned(),
-                    version: 0,
-                    text,
-                },
-            },
-        )
-        .await
-        .with_context(|| format!("failed to open LSP document {uri}"))?;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        opened_documents.insert(uri.clone());
-        Ok(())
-    }
-
-    async fn close_open_documents(&self) -> Result<()> {
-        let documents = self
-            .opened_documents
-            .lock()
-            .await
-            .drain()
-            .collect::<Vec<_>>();
-        let mut first_error = None;
-        for uri in documents {
-            if let Err(error) = self
-                .notify(
-                    "textDocument/didClose",
-                    DidCloseTextDocumentParams {
-                        text_document: TextDocumentIdentifier::new(uri),
-                    },
-                )
-                .await
-                && first_error.is_none()
-            {
-                first_error = Some(error);
-            }
-        }
-        first_error.map_or(Ok(()), Err)
-    }
 }
 
 fn spawn_json_rpc<R, W>(
@@ -1360,22 +1289,6 @@ fn workspace_name(workspace_root: &Path) -> String {
         .and_then(OsStr::to_str)
         .unwrap_or("workspace")
         .to_owned()
-}
-
-fn language_id_for_path(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("rs") => Some("rust"),
-        Some("py") | Some("pyi") => Some("python"),
-        Some("c") => Some("c"),
-        Some("cc") | Some("cpp") | Some("cxx") | Some("h") | Some("hh") | Some("hpp")
-        | Some("hxx") | Some("ixx") | Some("cppm") => Some("cpp"),
-        _ => None,
-    }
 }
 
 fn response_id(message: &Value) -> Option<u64> {
