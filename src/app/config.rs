@@ -1,5 +1,5 @@
 use crate::{
-    config::{FilterConfig, PathFilter, SymbolFilter},
+    config::FilterConfig,
     fetch::CachePolicy,
     state::{HierarchyDirection, LoadState},
 };
@@ -7,46 +7,16 @@ use crate::{
 use super::{App, HierarchyLoadRequest};
 
 impl App {
-    pub fn set_symbol_filter(&mut self, symbol_filter: SymbolFilter) {
-        self.symbol_filter = symbol_filter;
-    }
-
-    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
-        self.path_filter = path_filter;
-    }
-
     pub fn set_filters(&mut self, filters: FilterConfig) {
-        self.symbol_filter = filters.symbol_filter();
-        self.path_filter = filters.path_filter();
         self.filters = filters;
     }
 
     pub fn reload_filters(
         &mut self,
-        symbol_filter: SymbolFilter,
-        path_filter: PathFilter,
-        hierarchy_available: bool,
-    ) -> Vec<HierarchyLoadRequest> {
-        self.path_filter = path_filter;
-        self.reload_symbol_filter(symbol_filter, hierarchy_available)
-    }
-
-    pub fn reload_filter_config(
-        &mut self,
         filters: FilterConfig,
         hierarchy_available: bool,
     ) -> Vec<HierarchyLoadRequest> {
-        self.path_filter = filters.path_filter();
-        self.filters = filters.clone();
-        self.reload_symbol_filter(filters.symbol_filter(), hierarchy_available)
-    }
-
-    pub fn reload_symbol_filter(
-        &mut self,
-        symbol_filter: SymbolFilter,
-        hierarchy_available: bool,
-    ) -> Vec<HierarchyLoadRequest> {
-        self.symbol_filter = symbol_filter;
+        self.filters = filters;
         let mut targets = Vec::new();
         for node_id in self.graph.known_graph().nodes {
             let Some(node) = self.graph.node(node_id) else {
@@ -94,7 +64,7 @@ mod tests {
     use super::super::App;
     use crate::{
         cli::Cli,
-        config::SymbolFilter,
+        config::FilterConfig,
         fetch::{FetchSource, HierarchyResponse},
         state::{HierarchyDirection, HierarchyKind, NodeId, SourceLocation, SymbolIdentity},
     };
@@ -109,7 +79,7 @@ mod tests {
         let stale = app.refresh_selected_branches(true);
 
         let current =
-            app.reload_symbol_filter(SymbolFilter::from_patterns(["noise"]).unwrap(), true);
+            app.reload_filters(FilterConfig::from_rules(["#noise"], false).unwrap(), true);
 
         assert_eq!(current.len(), 2);
         assert!(current.iter().all(|request| {
@@ -135,6 +105,22 @@ mod tests {
             ["keep"]
         );
         assert!(app.graph.is_anchor(root));
+    }
+
+    #[test]
+    fn applies_cross_namespace_rules_once_in_written_order() {
+        let mut app = App::from_cli(Cli::try_parse_from(["cgraph", "call", "root"]).unwrap());
+        app.set_filters(FilterConfig::from_rules(["#noise", "!**/noise.rs"], false).unwrap());
+        let request = app
+            .toggle_selected_branch(HierarchyDirection::Outgoing, true)
+            .unwrap();
+
+        assert!(app.finish_hierarchy(&request, Ok(response(&request, vec![identity("noise")]))));
+
+        assert_eq!(
+            branch_names(&app, app.selected.unwrap(), HierarchyDirection::Outgoing),
+            ["noise"]
+        );
     }
 
     fn response(

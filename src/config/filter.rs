@@ -6,7 +6,7 @@
 //! A rule excludes a match by default; a leading `!` includes it again. Rules are evaluated in their
 //! written order, so the last matching rule wins, just like `.gitignore`.
 
-use std::{fmt, path::Path};
+use std::path::Path;
 
 /// Special pattern that matches every candidate in either filter namespace.
 pub const FILTER_ALL: &str = "<all>";
@@ -45,12 +45,6 @@ impl FilterRule {
         }
     }
 
-    fn pattern(&self) -> &FilterPattern {
-        match self {
-            Self::FilePath { pattern, .. } | Self::Symbol { pattern, .. } => pattern,
-        }
-    }
-
     fn matches(
         &self,
         symbol: Option<&str>,
@@ -84,72 +78,6 @@ enum MatchKind {
     Path,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FilterRules {
-    rules: Vec<FilterRule>,
-    kind: MatchKind,
-}
-
-impl FilterRules {
-    fn from_patterns<I, S>(patterns: I, kind: MatchKind) -> anyhow::Result<Self>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let mut rules = Vec::new();
-        for raw in patterns {
-            let raw = raw.into();
-            let raw = raw.trim();
-            if raw.is_empty() {
-                anyhow::bail!("filter contains an empty pattern");
-            }
-            let (action, pattern) = raw
-                .strip_prefix('!')
-                .map_or((FilterAction::Exclude, raw), |pattern| {
-                    (FilterAction::Include, pattern)
-                });
-            if pattern.is_empty() {
-                anyhow::bail!("filter contains a bare ! pattern");
-            }
-            let pattern = match pattern {
-                FILTER_ALL => FilterPattern::All,
-                FILTER_WORKSPACE if kind == MatchKind::Path => FilterPattern::Workspace,
-                FILTER_WORKSPACE => {
-                    anyhow::bail!("{FILTER_WORKSPACE} is only valid for file-path rules")
-                }
-                pattern => {
-                    validate_glob(pattern)?;
-                    FilterPattern::Glob(pattern.to_owned())
-                }
-            };
-            rules.push(match kind {
-                MatchKind::Symbol => FilterRule::Symbol { action, pattern },
-                MatchKind::Path => FilterRule::FilePath { action, pattern },
-            });
-        }
-        Ok(Self { rules, kind })
-    }
-
-    fn matches(&self, rule: &FilterRule, candidate: &str, outside_workspace: bool) -> bool {
-        pattern_matches(rule.pattern(), candidate, self.kind, outside_workspace)
-    }
-
-    fn is_ignored(&self, candidate: &str, outside_workspace: bool, mut included: bool) -> bool {
-        for rule in &self.rules {
-            if self.matches(rule, candidate, outside_workspace) {
-                included = rule.action() == FilterAction::Include;
-            }
-        }
-        !included
-    }
-}
-
-/// Ordered filters for normalized, provider-generated display names.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SymbolFilter {
-    rules: FilterRules,
-}
-
 /// The two namespaces parsed from one project-local rule list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilterConfig {
@@ -167,14 +95,6 @@ impl Default for FilterConfig {
 }
 
 impl FilterConfig {
-    pub fn from_patterns<I, S>(rules: I, workspace_only: bool) -> anyhow::Result<Self>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self::from_rules(rules, workspace_only)
-    }
-
     pub fn from_rules<I, S>(rules: I, workspace_only: bool) -> anyhow::Result<Self>
     where
         I: IntoIterator<Item = S>,
@@ -193,11 +113,9 @@ impl FilterConfig {
                 } else {
                     name.to_owned()
                 };
-                parsed.extend(FilterRules::from_patterns([name], MatchKind::Symbol)?.rules);
+                parsed.push(parse_filter_rule(&name, MatchKind::Symbol)?);
             } else {
-                parsed.extend(
-                    FilterRules::from_patterns([trimmed.to_owned()], MatchKind::Path)?.rules,
-                );
+                parsed.push(parse_filter_rule(trimmed, MatchKind::Path)?);
             }
         }
         Ok(Self {
@@ -206,27 +124,8 @@ impl FilterConfig {
         })
     }
 
-    pub fn symbol_filter(&self) -> SymbolFilter {
-        SymbolFilter {
-            rules: FilterRules {
-                rules: self
-                    .rules
-                    .iter()
-                    .filter(|rule| matches!(rule, FilterRule::Symbol { .. }))
-                    .cloned()
-                    .collect(),
-                kind: MatchKind::Symbol,
-            },
-        }
-    }
-
     pub fn workspace_only(&self) -> bool {
         self.workspace_only
-    }
-
-    pub fn with_workspace_only(mut self, workspace_only: bool) -> Self {
-        self.workspace_only = workspace_only;
-        self
     }
 
     pub fn is_ignored_symbol(&self, symbol: &str) -> bool {
@@ -243,9 +142,8 @@ impl FilterConfig {
 
     /// Evaluates all matching file and symbol rules in their original order.
     ///
-    /// This is intentionally not implemented by combining `SymbolFilter` and
-    /// `PathFilter`: a later `!#symbol` must be able to re-include an item that
-    /// an earlier file-path rule excluded.
+    /// A later symbol rule can therefore re-include an item that an earlier
+    /// file-path rule excluded, and vice versa.
     pub fn is_ignored(
         &self,
         symbol: Option<&str>,
@@ -276,124 +174,36 @@ impl FilterConfig {
         }
         !included
     }
+}
 
-    pub fn path_filter(&self) -> PathFilter {
-        PathFilter {
-            rules: FilterRules {
-                rules: self
-                    .rules
-                    .iter()
-                    .filter(|rule| matches!(rule, FilterRule::FilePath { .. }))
-                    .cloned()
-                    .collect(),
-                kind: MatchKind::Path,
-            },
-            workspace_only: self.workspace_only,
+fn parse_filter_rule(raw: &str, kind: MatchKind) -> anyhow::Result<FilterRule> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        anyhow::bail!("filter contains an empty pattern");
+    }
+    let (action, pattern) = raw
+        .strip_prefix('!')
+        .map_or((FilterAction::Exclude, raw), |pattern| {
+            (FilterAction::Include, pattern)
+        });
+    if pattern.is_empty() {
+        anyhow::bail!("filter contains a bare ! pattern");
+    }
+    let pattern = match pattern {
+        FILTER_ALL => FilterPattern::All,
+        FILTER_WORKSPACE if kind == MatchKind::Path => FilterPattern::Workspace,
+        FILTER_WORKSPACE => {
+            anyhow::bail!("{FILTER_WORKSPACE} is only valid for file-path rules")
         }
-    }
-}
-
-impl Default for SymbolFilter {
-    fn default() -> Self {
-        Self {
-            rules: FilterRules {
-                rules: Vec::new(),
-                kind: MatchKind::Symbol,
-            },
+        pattern => {
+            validate_glob(pattern)?;
+            FilterPattern::Glob(pattern.to_owned())
         }
-    }
-}
-
-impl SymbolFilter {
-    pub fn from_patterns<I, S>(patterns: I) -> anyhow::Result<Self>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Ok(Self {
-            rules: FilterRules::from_patterns(patterns, MatchKind::Symbol)?,
-        })
-    }
-
-    /// Returns true when the ordered rules exclude `symbol_name`.
-    pub fn is_ignored(&self, symbol_name: &str) -> bool {
-        self.rules.is_ignored(symbol_name, false, true)
-    }
-}
-
-/// Ordered filters for workspace-relative file paths.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PathFilter {
-    rules: FilterRules,
-    workspace_only: bool,
-}
-
-impl Default for PathFilter {
-    fn default() -> Self {
-        Self {
-            rules: FilterRules {
-                rules: Vec::new(),
-                kind: MatchKind::Path,
-            },
-            workspace_only: true,
-        }
-    }
-}
-
-impl PathFilter {
-    pub fn from_patterns<I, S>(patterns: I, workspace_only: bool) -> anyhow::Result<Self>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Ok(Self {
-            rules: FilterRules::from_patterns(patterns, MatchKind::Path)?,
-            workspace_only,
-        })
-    }
-
-    pub fn workspace_only(&self) -> bool {
-        self.workspace_only
-    }
-
-    pub fn with_workspace_only(mut self, workspace_only: bool) -> Self {
-        self.workspace_only = workspace_only;
-        self
-    }
-
-    /// Returns true when a path is excluded by scope or by an ordered rule.
-    pub fn is_ignored(&self, path: &Path, workspace_root: &Path) -> bool {
-        let path = absolute_for_matching(path);
-        let workspace_root = absolute_for_matching(workspace_root);
-        let normalized_path = normalize_path(&path);
-        let inside_workspace = path.starts_with(&workspace_root);
-        let relative = path
-            .strip_prefix(&workspace_root)
-            .map(normalize_path)
-            .unwrap_or_else(|_| normalized_path.clone());
-        let mut included = !self.workspace_only || inside_workspace;
-        for rule in &self.rules.rules {
-            let matches = self.rules.matches(rule, &relative, !inside_workspace)
-                || (relative != normalized_path
-                    && self
-                        .rules
-                        .matches(rule, &normalized_path, !inside_workspace));
-            if matches {
-                included = rule.action() == FilterAction::Include;
-            }
-        }
-        !included
-    }
-
-    pub fn is_visible(&self, path: &Path, workspace_root: &Path) -> bool {
-        !self.is_ignored(path, workspace_root)
-    }
-}
-
-impl fmt::Display for PathFilter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("path filter")
-    }
+    };
+    Ok(match kind {
+        MatchKind::Symbol => FilterRule::Symbol { action, pattern },
+        MatchKind::Path => FilterRule::FilePath { action, pattern },
+    })
 }
 
 fn validate_glob(pattern: &str) -> anyhow::Result<()> {
@@ -499,16 +309,16 @@ fn path_glob_matches(pattern: &str, candidate: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{FILTER_ALL, FILTER_WORKSPACE, FilterConfig, PathFilter, SymbolFilter};
+    use super::{FILTER_ALL, FILTER_WORKSPACE, FilterConfig};
 
     #[test]
     fn one_rule_list_uses_hash_to_select_symbol_namespace() {
         let filters =
             FilterConfig::from_rules(["#*::into", "!#Option::into", "**/generated/**"], true)
                 .unwrap();
-        assert!(filters.symbol_filter().is_ignored("Vec::into"));
-        assert!(!filters.symbol_filter().is_ignored("Option::into"));
-        assert!(filters.path_filter().is_ignored(
+        assert!(filters.is_ignored_symbol("Vec::into"));
+        assert!(!filters.is_ignored_symbol("Option::into"));
+        assert!(filters.is_ignored_path(
             Path::new("/workspace/generated/a.rs"),
             Path::new("/workspace")
         ));
@@ -516,43 +326,45 @@ mod tests {
 
     #[test]
     fn later_rules_override_earlier_rules_and_bang_reincludes() {
-        let filter = SymbolFilter::from_patterns(["*", "!main", "main::*"]).unwrap();
-        assert!(!filter.is_ignored("main"));
-        assert!(filter.is_ignored("main::run"));
-        assert!(filter.is_ignored("other"));
+        let filters = FilterConfig::from_rules(["#*", "!#main", "#main::*"], false).unwrap();
+        assert!(!filters.is_ignored_symbol("main"));
+        assert!(filters.is_ignored_symbol("main::run"));
+        assert!(filters.is_ignored_symbol("other"));
     }
 
     #[test]
     fn supports_all_placeholder_and_validates_workspace_placeholder_scope() {
-        let filter = SymbolFilter::from_patterns([FILTER_ALL, "!main"]).unwrap();
-        assert!(!filter.is_ignored("main"));
-        assert!(filter.is_ignored("other"));
-        assert!(SymbolFilter::from_patterns([FILTER_WORKSPACE]).is_err());
+        let filters =
+            FilterConfig::from_rules([format!("#{FILTER_ALL}"), "!#main".to_owned()], false)
+                .unwrap();
+        assert!(!filters.is_ignored_symbol("main"));
+        assert!(filters.is_ignored_symbol("other"));
+        assert!(FilterConfig::from_rules([format!("#{FILTER_WORKSPACE}")], false).is_err());
     }
 
     #[test]
     fn path_star_does_not_cross_directories_but_double_star_does() {
         let root = Path::new("/workspace");
-        let filter = PathFilter::from_patterns(["src/*.rs"], false).unwrap();
-        assert!(filter.is_ignored(&root.join("src/main.rs"), root));
-        assert!(!filter.is_ignored(&root.join("src/nested/main.rs"), root));
+        let filters = FilterConfig::from_rules(["src/*.rs"], false).unwrap();
+        assert!(filters.is_ignored_path(&root.join("src/main.rs"), root));
+        assert!(!filters.is_ignored_path(&root.join("src/nested/main.rs"), root));
 
-        let filter = PathFilter::from_patterns(["src/**/main.rs"], false).unwrap();
-        assert!(filter.is_ignored(&root.join("src/nested/main.rs"), root));
+        let filters = FilterConfig::from_rules(["src/**/main.rs"], false).unwrap();
+        assert!(filters.is_ignored_path(&root.join("src/nested/main.rs"), root));
 
-        let filter = PathFilter::from_patterns(["**/*.rs"], false).unwrap();
-        assert!(filter.is_ignored(&root.join("main.rs"), root));
+        let filters = FilterConfig::from_rules(["**/*.rs"], false).unwrap();
+        assert!(filters.is_ignored_path(&root.join("main.rs"), root));
     }
 
     #[test]
     fn workspace_placeholder_excludes_external_paths_and_can_be_reincluded() {
         let root = Path::new("/workspace");
-        let filter = PathFilter::from_patterns([FILTER_WORKSPACE], true).unwrap();
-        assert!(!filter.is_ignored(root.join("src/main.rs").as_path(), root));
-        assert!(filter.is_ignored(Path::new("/usr/include/stdio.h"), root));
+        let filters = FilterConfig::from_rules([FILTER_WORKSPACE], true).unwrap();
+        assert!(!filters.is_ignored_path(root.join("src/main.rs").as_path(), root));
+        assert!(filters.is_ignored_path(Path::new("/usr/include/stdio.h"), root));
 
-        let filter = PathFilter::from_patterns([FILTER_WORKSPACE, "!**/stdio.h"], true).unwrap();
-        assert!(!filter.is_ignored(Path::new("/usr/include/stdio.h"), root));
+        let filters = FilterConfig::from_rules([FILTER_WORKSPACE, "!**/stdio.h"], true).unwrap();
+        assert!(!filters.is_ignored_path(Path::new("/usr/include/stdio.h"), root));
     }
 
     #[test]

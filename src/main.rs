@@ -184,8 +184,6 @@ fn lsp_config(cli: &Cli, project_config: &ProjectConfig) -> Option<LspConfig> {
         }))
     });
     let config = LspConfig::for_server(program, &cli.workspace)
-        .workspace_only(project_config.workspace_only)
-        .path_filter(project_config.path_filter.clone())
         .filters(project_config.filters.clone())
         .stderr_log(log_file);
     let config = match name {
@@ -264,7 +262,7 @@ mod tests {
     use cgraph::{
         app::{AnalysisBackend, AnalysisPhase, App},
         cli::Cli,
-        config::{LspSettings, PathFilter, ProjectConfig, SymbolFilter},
+        config::{FilterConfig, LspSettings, ProjectConfig},
         fetch::HierarchyQuery,
         state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
     };
@@ -350,7 +348,7 @@ mod tests {
         assert_eq!(detected.program, "pyrefly");
         assert_eq!(detected.args, ["lsp"].map(std::ffi::OsString::from));
         assert_eq!(detected.server_name.as_deref(), Some("pyrefly"));
-        assert!(detected.workspace_only);
+        assert!(detected.filters.workspace_only());
         assert_eq!(
             detected.stderr_log.as_deref().and_then(Path::parent),
             Some(std::env::temp_dir().as_path())
@@ -375,11 +373,7 @@ mod tests {
     fn project_lsp_configuration_overrides_builtin_detection() {
         let cli = Cli::try_parse_from(["cgraph", "--workspace", "/workspace"]).unwrap();
         let project_config = ProjectConfig {
-            filters: cgraph::config::FilterConfig::from_rules(std::iter::empty::<&str>(), true)
-                .unwrap(),
-            symbol_filter: SymbolFilter::default(),
-            path_filter: PathFilter::default(),
-            workspace_only: true,
+            filters: FilterConfig::default(),
             lsp: Some(LspSettings {
                 name: "clangd".to_owned(),
                 command: "custom-lsp".to_owned(),
@@ -398,7 +392,7 @@ mod tests {
                 .map(std::ffi::OsString::from)
                 .to_vec()
         );
-        assert!(config.workspace_only);
+        assert!(config.filters.workspace_only());
         assert_eq!(config.file_extensions, ["cppm", "ixx"]);
         assert_eq!(
             config.stderr_log,

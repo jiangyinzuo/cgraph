@@ -53,8 +53,8 @@ use tower_lsp::lsp_types::{
 };
 
 use crate::{
-    config::{FilterConfig, PathFilter},
-    fetch::{FetchSource, HierarchyQuery, HierarchyResponse},
+    config::FilterConfig,
+    fetch::{FetchSource, HierarchyQuery, HierarchyResponse, WorkspaceSymbolMatch},
     state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
 };
 use capabilities::{
@@ -78,11 +78,6 @@ use symbol_names::SymbolNameAdapter;
 pub use progress::LspStatusUpdate;
 pub use settings::{LspConfig, builtin_file_extensions};
 
-#[cfg(test)]
-use normalize::{symbol_belongs_to_workspace, workspace_symbol_is_visible};
-
-pub use crate::fetch::WorkspaceSymbolMatch;
-
 fn symbol_uri_is_visible(
     symbol: &str,
     uri: &Url,
@@ -101,8 +96,6 @@ pub struct WorkspaceSymbolClient {
     client: JsonRpcClient,
     workspace_root: PathBuf,
     symbol_names: SymbolNameAdapter,
-    workspace_only: bool,
-    path_filter: PathFilter,
     filters: FilterConfig,
 }
 
@@ -148,20 +141,7 @@ impl WorkspaceSymbolClient {
         Ok(visible)
     }
 
-    pub fn set_workspace_only(&mut self, workspace_only: bool) {
-        self.workspace_only = workspace_only;
-        self.path_filter = self.path_filter.clone().with_workspace_only(workspace_only);
-        self.filters = self.filters.clone().with_workspace_only(workspace_only);
-    }
-
-    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
-        self.workspace_only = path_filter.workspace_only();
-        self.path_filter = path_filter;
-    }
-
     pub fn set_filters(&mut self, filters: FilterConfig) {
-        self.workspace_only = filters.workspace_only();
-        self.path_filter = filters.path_filter();
         self.filters = filters;
     }
 }
@@ -173,8 +153,6 @@ pub struct HierarchyClient {
     symbol_names: SymbolNameAdapter,
     document_symbols: DocumentSymbolCache,
     capabilities: Arc<ServerHierarchyCapabilities>,
-    workspace_only: bool,
-    path_filter: PathFilter,
     filters: FilterConfig,
 }
 
@@ -241,8 +219,6 @@ impl HierarchyClient {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
             symbol_names: self.symbol_names,
-            workspace_only: self.workspace_only,
-            path_filter: self.path_filter.clone(),
             filters: self.filters.clone(),
         }
         .query(lookup_name)
@@ -459,20 +435,7 @@ impl HierarchyClient {
             .collect())
     }
 
-    pub fn set_workspace_only(&mut self, workspace_only: bool) {
-        self.workspace_only = workspace_only;
-        self.path_filter = self.path_filter.clone().with_workspace_only(workspace_only);
-        self.filters = self.filters.clone().with_workspace_only(workspace_only);
-    }
-
-    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
-        self.workspace_only = path_filter.workspace_only();
-        self.path_filter = path_filter;
-    }
-
     pub fn set_filters(&mut self, filters: FilterConfig) {
-        self.workspace_only = filters.workspace_only();
-        self.path_filter = filters.path_filter();
         self.filters = filters;
     }
 }
@@ -487,8 +450,6 @@ pub struct LspProvider {
     document_symbols: DocumentSymbolCache,
     hierarchy_capabilities: Arc<ServerHierarchyCapabilities>,
     status_receiver: Option<mpsc::UnboundedReceiver<LspStatusUpdate>>,
-    workspace_only: bool,
-    path_filter: PathFilter,
     filters: FilterConfig,
 }
 
@@ -701,14 +662,8 @@ impl LspProvider {
             document_symbols: Arc::new(Mutex::new(HashMap::new())),
             hierarchy_capabilities,
             status_receiver: Some(status_receiver),
-            workspace_only: config.workspace_only,
-            path_filter: config.path_filter,
             filters: config.filters,
         })
-    }
-
-    pub fn workspace_root(&self) -> &Path {
-        &self.workspace_root
     }
 
     pub fn server_info(&self) -> Option<&ServerInfo> {
@@ -726,8 +681,6 @@ impl LspProvider {
             client: self.client.clone(),
             workspace_root: self.workspace_root.clone(),
             symbol_names: self.symbol_names,
-            workspace_only: self.workspace_only,
-            path_filter: self.path_filter.clone(),
             filters: self.filters.clone(),
         }
     }
@@ -739,8 +692,6 @@ impl LspProvider {
             symbol_names: self.symbol_names,
             document_symbols: Arc::clone(&self.document_symbols),
             capabilities: Arc::clone(&self.hierarchy_capabilities),
-            workspace_only: self.workspace_only,
-            path_filter: self.path_filter.clone(),
             filters: self.filters.clone(),
         }
     }
@@ -1245,7 +1196,7 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use crate::config::{FilterConfig, PathFilter};
+    use crate::config::FilterConfig;
     use serde_json::{Value, json};
     use tokio::io::{BufReader, duplex, split};
     use tokio::time::timeout;
@@ -1257,47 +1208,19 @@ mod tests {
     use super::symbol_names::SymbolNameAdapter;
     use super::{
         HierarchyClient, LspConfig, LspProgressTracker, LspProvider, LspStatusUpdate,
-        WorkspaceSymbolClient, WorkspaceSymbolMatch, client_capabilities, deduplicate_symbols,
+        WorkspaceSymbolClient, client_capabilities, deduplicate_symbols,
         handle_server_notification, normalize_symbols, read_message, requested_configuration,
-        response_id, spawn_json_rpc, symbol_belongs_to_workspace, symbol_leaf_name,
-        uses_utf16_positions, workspace_symbol_initialization_options, workspace_symbol_is_visible,
-        write_message,
+        response_id, spawn_json_rpc, symbol_leaf_name, uses_utf16_positions,
+        workspace_symbol_initialization_options, write_message,
     };
     use crate::fetch::treesitter::{TreeSitterLanguage, TreeSitterProvider};
     use crate::{
-        fetch::{FetchSource, HierarchyClient as FetchHierarchyClient, HierarchyQuery},
+        fetch::{
+            FetchSource, HierarchyClient as FetchHierarchyClient, HierarchyQuery,
+            WorkspaceSymbolMatch,
+        },
         state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
     };
-
-    #[test]
-    fn excludes_symbols_outside_the_workspace() {
-        let project_symbol = symbol("file:///workspace/src/main.rs");
-        let dependency_symbol = symbol("file:///registry/dependency/src/lib.rs");
-        let sibling_symbol = symbol("file:///workspace-other/src/lib.rs");
-
-        assert!(symbol_belongs_to_workspace(
-            &project_symbol,
-            Path::new("/workspace")
-        ));
-        assert!(!symbol_belongs_to_workspace(
-            &dependency_symbol,
-            Path::new("/workspace")
-        ));
-        assert!(!symbol_belongs_to_workspace(
-            &sibling_symbol,
-            Path::new("/workspace")
-        ));
-        assert!(workspace_symbol_is_visible(
-            &dependency_symbol,
-            Path::new("/workspace"),
-            false
-        ));
-        assert!(!workspace_symbol_is_visible(
-            &dependency_symbol,
-            Path::new("/workspace"),
-            true
-        ));
-    }
 
     #[test]
     fn configures_rust_analyzer_for_project_only_all_symbol_queries() {
@@ -1361,8 +1284,9 @@ mod tests {
         assert_eq!(pyrefly_wrapper.args, ["lsp"].map(std::ffi::OsString::from));
         assert!(
             !LspConfig::for_server("clangd", "/workspace")
-                .workspace_only(false)
-                .workspace_only
+                .filters(FilterConfig::from_rules(std::iter::empty::<&str>(), false).unwrap())
+                .filters
+                .workspace_only()
         );
         assert_eq!(
             LspConfig::for_server("/usr/bin/clangd", "/workspace").file_extensions,
@@ -1439,8 +1363,6 @@ mod tests {
             client: rpc_client.clone(),
             workspace_root: PathBuf::from("/workspace"),
             symbol_names: SymbolNameAdapter::Standard,
-            workspace_only: true,
-            path_filter: PathFilter::default(),
             filters: FilterConfig::default(),
         };
         let query = tokio::spawn(async move { client.query("missing").await.unwrap() });
@@ -1489,8 +1411,6 @@ mod tests {
             symbol_names: SymbolNameAdapter::RustAnalyzer,
             document_symbols: Default::default(),
             capabilities,
-            workspace_only: true,
-            path_filter: PathFilter::default(),
             filters: FilterConfig::default(),
         };
         let query = HierarchyQuery {
@@ -1631,8 +1551,6 @@ mod tests {
             symbol_names: SymbolNameAdapter::Standard,
             document_symbols: Default::default(),
             capabilities: Arc::clone(&capabilities),
-            workspace_only: true,
-            path_filter: PathFilter::default(),
             filters: FilterConfig::default(),
         };
         let query = HierarchyQuery {
@@ -1741,8 +1659,6 @@ mod tests {
             symbol_names: SymbolNameAdapter::RustAnalyzer,
             document_symbols: Default::default(),
             capabilities,
-            workspace_only: true,
-            path_filter: PathFilter::default(),
             filters: FilterConfig::default(),
         };
         let hybrid = FetchHierarchyClient::with_fallback(lsp, tree_sitter.hierarchy_client());

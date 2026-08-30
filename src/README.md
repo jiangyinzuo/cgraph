@@ -71,7 +71,7 @@ ipc  -> state
 export -> state
 ```
 
-`WorkspaceSymbolMatch` 已位于 Fetch 公共层并由两种 provider 返回；旧的 `fetch::lsp::WorkspaceSymbolMatch` 路径仅保留兼容重导出。TUI 仍使用 `tower_lsp::SymbolKind` 做 call/type 分类，这是当前唯一剩余的协议枚举泄漏，未来增加无法自然映射的新 provider 时再替换为项目级类型。
+`WorkspaceSymbolMatch` 位于 Fetch 公共层并由两种 provider 返回。TUI 仍使用 `tower_lsp::SymbolKind` 做 call/type 分类，这是当前唯一的协议枚举泄漏；增加无法自然映射的新 provider 时，应替换为项目级类型。
 
 ## 生命周期
 
@@ -95,12 +95,9 @@ export -> state
 - 收起分支只影响展示状态，不应清除已经获取的数据。
 - 刷新只替换一层结果，并保留仍然存在的子节点实例及其展开状态。
 
-## 近期结构性工作
+## 后续结构性工作
 
 - 为大图增加图版本号和布局快照缓存，避免无状态变化时每帧重算 SCC 与 rank。
-- `App` 的搜索、hierarchy、分析状态、消息、配置和保存迁移已经按变化原因拆分；后续只在 canvas 或 command-prefix 状态继续显著增长时再提取，避免为了文件数量机械拆分。
-- `FilterConfig` 已是有序规则的语义真源，但 `ProjectConfig`、`App` 和 LSP client 仍保留部分 `SymbolFilter` / `PathFilter` 兼容字段与 setter。直接删除会破坏当前 library API，应先增加弃用期和调用迁移测试，再在明确的破坏性版本中收敛；本轮不冒险改变过滤顺序。
-- `FetchCoordinator` 当前没有被主程序使用，但属于公开 API。确认外部使用情况之前不以“未使用”为由删除；后续若保留，应让 `main` 也通过它组装 hybrid hierarchy，否则应在版本迁移说明中弃用。
 - 为 Tree-sitter 索引增加文件变更失效、取消、规模上限和可观测进度；当前索引在会话内构建一次。
 - 为 LSP 查询增加超时、日志轮转和服务端崩溃后的恢复策略；请求取消、基础 progress、空查询统计与每会话 stderr 文件已经实现。
 - 为 IPC 增加 capability handshake、实例发现和真实 Neovim/PTY 端到端测试；双向 NDJSON、入站限制、App command 路由、实例路径和 socket 清理规则已经固化。

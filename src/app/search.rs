@@ -173,19 +173,17 @@ impl App {
 
         match result {
             Ok(candidates) => {
-                let symbol_filter = &self.symbol_filter;
                 let filters = &self.filters;
                 let workspace = &self.workspace;
                 search.candidates = candidates
                     .into_iter()
                     .filter(|candidate| {
-                        !symbol_filter.is_ignored(&candidate.name)
-                            && candidate_is_visible(
-                                &candidate.name,
-                                candidate.source.as_ref(),
-                                filters,
-                                workspace,
-                            )
+                        candidate_is_visible(
+                            &candidate.name,
+                            candidate.source.as_ref(),
+                            filters,
+                            workspace,
+                        )
                     })
                     .collect();
                 search.status = SearchStatus::Ready;

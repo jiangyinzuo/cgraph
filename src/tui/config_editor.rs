@@ -62,7 +62,7 @@ pub(super) fn edit_project_config(
         }
     };
     let filters = config.filters.clone();
-    let requests = app.reload_filter_config(filters.clone(), hierarchy_available);
+    let requests = app.reload_filters(filters.clone(), hierarchy_available);
     Ok(Some(ConfigReload { requests, filters }))
 }
 

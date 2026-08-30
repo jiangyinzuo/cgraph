@@ -58,6 +58,6 @@ clangd 的 call hierarchy 可能把系统头文件或第三方依赖作为调用
 
 没有源码位置的 CLI 根会先去掉最后一个 `::` 或 `.` 限定段，再进行 workspace-symbol 定位。因此 Python 输入可以使用惯用 `Class.method`，也兼容已有通用输入。Pyrefly 目前要求 workspace-symbol query 至少 3 个字符；客户端仍发送空文本和短 query，以保持 provider 接口与搜索生命周期一致，空响应不会被解释成能力缺失。
 
-旧版或其他封装形式若直接在 `detail` 中提供 `impl` 描述，Rust adapter 仍可把它作为降级来源。解析保持保守：不完整的泛型、函数签名、文件路径和空文本都不会用于限定名称。document symbol 请求不支持、失败或没有匹配容器时，hierarchy 查询本身仍然成功并保留短方法名，避免命名增强破坏基础导航。
+server 若直接在 `detail` 中提供 `impl` 描述，Rust adapter 可把它作为降级来源。解析保持保守：不完整的泛型、函数签名、文件路径和空文本都不会用于限定名称。document symbol 请求不支持、失败或没有匹配容器时，hierarchy 查询本身仍然成功并保留短方法名，避免命名增强破坏基础导航。
 
 新增语言服务器时，应增加独立 adapter 分支和对应 fixture，不应放宽 Rust 解析器去猜测另一种协议方言。若某个 server 需要额外请求，也应在 adapter 边界内完成，并明确缓存与失败语义。

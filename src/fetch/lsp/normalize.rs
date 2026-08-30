@@ -1,6 +1,3 @@
-#[cfg(test)]
-use std::path::Path;
-
 use tower_lsp::lsp_types::{
     CallHierarchyItem, DocumentSymbol, DocumentSymbolResponse, Location, OneOf, Position, Range,
     SymbolInformation, SymbolKind, TextDocumentIdentifier, TextDocumentPositionParams,
@@ -23,29 +20,6 @@ pub(super) fn symbol_leaf_name(symbol: &str) -> &str {
         .rsplit_once('.')
         .map(|(_, name)| name)
         .unwrap_or(symbol)
-}
-
-#[cfg(test)]
-pub(super) fn symbol_belongs_to_workspace(
-    symbol: &WorkspaceSymbolMatch,
-    workspace_root: &Path,
-) -> bool {
-    uri_belongs_to_workspace(&symbol.uri, workspace_root)
-}
-
-#[cfg(test)]
-pub(super) fn workspace_symbol_is_visible(
-    symbol: &WorkspaceSymbolMatch,
-    workspace_root: &Path,
-    workspace_only: bool,
-) -> bool {
-    !workspace_only || symbol_belongs_to_workspace(symbol, workspace_root)
-}
-
-#[cfg(test)]
-pub(super) fn uri_belongs_to_workspace(uri: &Url, workspace_root: &Path) -> bool {
-    uri.to_file_path()
-        .is_ok_and(|path| path.starts_with(workspace_root))
 }
 
 pub(super) fn deduplicate_symbols(

@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs, io,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -136,7 +136,6 @@ impl IpcResponder {
 
 #[derive(Debug)]
 pub struct IpcServer {
-    socket_path: PathBuf,
     event_sender: IpcEventSender,
     command_receiver: Option<mpsc::Receiver<IpcCommand>>,
     shutdown_sender: Option<oneshot::Sender<()>>,
@@ -183,7 +182,6 @@ impl IpcServer {
         });
 
         Ok(Self {
-            socket_path,
             event_sender: IpcEventSender {
                 sender: event_sender,
                 client_count,
@@ -193,10 +191,6 @@ impl IpcServer {
             task: Some(task),
             socket_guard: Some(socket_guard),
         })
-    }
-
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
     }
 
     pub fn event_sender(&self) -> IpcEventSender {

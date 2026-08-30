@@ -4,7 +4,7 @@
 
 `config` 模块只负责定位 workspace 根目录的 `.cgraph.toml`、安全创建最小模板、校验 schema，并生成 UI 与 provider 无关的配置值。启动和 `ec` 返回后都走同一个严格 loader；本模块不监控文件变化、不启动编辑器，也不直接刷新图。
 
-过滤实现位于 `filter.rs`。`FilterConfig` 保留配置文件中的有序 `Vec<FilterRule>`；每个规则明确是 `FilePath` 或 `Symbol`，运行时再投影为 App/LSP 使用的窄过滤器，避免两个列表在解析阶段失去原始顺序。
+过滤实现位于 `filter.rs`。`FilterConfig` 保留配置文件中的有序 `Vec<FilterRule>`；每个规则明确是 `FilePath` 或 `Symbol`。Project config、App 和 LSP client 都直接携带这一结构，并以候选的完整名称与 URI 一次执行全部规则，避免拆成两个列表后丢失跨命名空间的覆盖顺序。
 
 `LspSettings` 是 `[lsp]` 段唯一的 Rust 配置模型，同时派生 TOML 的序列化和反序列化。它在加载后执行 command/name/extension 规范化；缺省模板通过同一个结构体序列化生成，避免模板字段与 loader schema 分叉。显式空 `name` 仍会报错；只有省略 `name` 时才从 command basename 推导。
 

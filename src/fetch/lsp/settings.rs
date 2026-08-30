@@ -2,7 +2,7 @@ use std::{ffi::OsString, path::PathBuf};
 
 use serde_json::Value;
 
-use crate::config::{FilterConfig, PathFilter};
+use crate::config::FilterConfig;
 
 use super::profile::{
     append_configured_args, apply_default_args, file_extensions,
@@ -19,8 +19,6 @@ pub struct LspConfig {
     pub args: Vec<OsString>,
     pub workspace_root: PathBuf,
     pub initialization_options: Option<Value>,
-    pub workspace_only: bool,
-    pub path_filter: PathFilter,
     pub filters: FilterConfig,
     pub server_name: Option<String>,
     pub file_extensions: Vec<String>,
@@ -28,14 +26,12 @@ pub struct LspConfig {
 }
 
 impl LspConfig {
-    pub fn new(program: impl Into<OsString>, workspace_root: impl Into<PathBuf>) -> Self {
+    fn new(program: impl Into<OsString>, workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
             args: Vec::new(),
             workspace_root: workspace_root.into(),
             initialization_options: None,
-            workspace_only: true,
-            path_filter: PathFilter::default(),
             filters: FilterConfig::default(),
             server_name: None,
             file_extensions: Vec::new(),
@@ -81,25 +77,7 @@ impl LspConfig {
         self
     }
 
-    pub fn initialization_options(mut self, options: Value) -> Self {
-        self.initialization_options = Some(options);
-        self
-    }
-
-    pub fn workspace_only(mut self, workspace_only: bool) -> Self {
-        self.workspace_only = workspace_only;
-        self.filters = self.filters.with_workspace_only(workspace_only);
-        self
-    }
-
-    pub fn path_filter(mut self, path_filter: PathFilter) -> Self {
-        self.path_filter = path_filter;
-        self
-    }
-
     pub fn filters(mut self, filters: FilterConfig) -> Self {
-        self.workspace_only = filters.workspace_only();
-        self.path_filter = filters.path_filter();
         self.filters = filters;
         self
     }

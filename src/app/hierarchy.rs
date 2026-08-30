@@ -152,13 +152,12 @@ impl App {
                     .children
                     .into_iter()
                     .filter(|child| {
-                        !self.symbol_filter.is_ignored(&child.symbol)
-                            && candidate_is_visible(
-                                &child.symbol,
-                                child.location.as_ref(),
-                                &self.filters,
-                                &self.workspace,
-                            )
+                        candidate_is_visible(
+                            &child.symbol,
+                            child.location.as_ref(),
+                            &self.filters,
+                            &self.workspace,
+                        )
                     })
                     .collect();
                 self.graph

@@ -20,14 +20,14 @@
 
 <!-- test-inventory
 src/app.rs: 20
-src/app/config.rs: 1
+src/app/config.rs: 2
 src/app/fuzzy.rs: 2
 src/app/save.rs: 1
 src/cli.rs: 5
 src/config/mod.rs: 4
 src/config/filter.rs: 6
 src/export/mod.rs: 3
-src/fetch/lsp.rs: 19
+src/fetch/lsp.rs: 18
 src/fetch/lsp/clangd.rs: 1
 src/fetch/lsp/profile.rs: 2
 src/fetch/lsp/symbol_names.rs: 5
@@ -50,14 +50,14 @@ total: 146
 | 位置 | 数量 | 类型 | 主要覆盖 |
 | --- | ---: | --- | --- |
 | `src/app.rs` | 20 | 状态机单元测试 | 搜索生命周期、完整 LSP Query、三栏焦点循环、Symbol/URI 缓存过滤、空查询、Unicode 路径匹配、项目符号过滤、模糊排序、根管理、hierarchy 加载/缓存/刷新/去重/竞态、Tree-sitter 提示和外部聚焦 |
-| `src/app/config.rs` | 1 | 配置重载状态机测试 | 全部成功空/已加载/正在刷新分支、新 request id、过滤应用、anchor 保留与迟到结果拒绝 |
+| `src/app/config.rs` | 2 | 配置重载状态机测试 | 全部成功空/已加载/正在刷新分支、新 request id、跨路径/符号命名空间的有序过滤、anchor 保留与迟到结果拒绝 |
 | `src/app/fuzzy.rs` | 2 | 模糊匹配适配器单元测试 | 通过 `nucleo-matcher` 验证 Unicode 子序列和忽略输入空白的单序列匹配 |
 | `src/app/save.rs` | 1 | 保存状态单元测试 | 路径编辑、错误保留与再次编辑恢复 |
 | `src/cli.rs` | 5 | 解析测试 | call 子命令、空画布、LSP 参数位置、LSP 日志覆盖、IPC socket 路径 |
 | `src/config/mod.rs` | 4 | 配置加载单元测试 | 缺省加载、严格 TOML、统一规则列表、默认项目范围、外部 `printf` 例外、LSP 文件后缀规范化及非法值 |
 | `src/config/filter.rs` | 6 | 过滤规则单元测试 | `FilterConfig` 的 `FilePath` / `Symbol` 规则分类、有序覆盖、跨类型 `!#printf` 重新包含、`<all>` / `<workspace>` 占位符、Unicode `*`、路径 `*` / `**` 层级语义 |
 | `src/export/mod.rs` | 3 | 序列化与文件系统测试 | 稳定人类可读格式、共享节点/循环、空路径、安全创建与禁止覆盖 |
-| `src/fetch/lsp.rs` | 19 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、空查询诊断统计、call/type hierarchy、项目外 hierarchy URI 过滤（含 clangd `printf` 头文件回归）、clangd 头文件按需 `didOpen` 后 hierarchy 回归、动态 capability、未注册 type hierarchy 的 Tree-sitter 回退、Pyrefly/clangd 命令与索引 bootstrap、取消、进度、安全限制、UTF-16 position 协商，以及条件执行的真实 Pyrefly/rust-analyzer/clangd 最小和多文件工作区（call hierarchy 与 type hierarchy/fallback） |
+| `src/fetch/lsp.rs` | 18 | 协议与异步集成测试 | JSON-RPC、workspace/document symbol、空查询诊断统计、call/type hierarchy、项目外 hierarchy URI 过滤（含 clangd `printf` 头文件回归）、clangd 头文件按需 `didOpen` 后 hierarchy 回归、动态 capability、未注册 type hierarchy 的 Tree-sitter 回退、Pyrefly/clangd 命令与索引 bootstrap、取消、进度、安全限制、UTF-16 position 协商，以及条件执行的真实 Pyrefly/rust-analyzer/clangd 最小和多文件工作区（call hierarchy 与 type hierarchy/fallback） |
 | `src/fetch/lsp/clangd.rs` | 1 | clangd bootstrap 单元测试 | 头文件默认语言 id、项目自定义扩展名与不匹配扩展名 |
 | `src/fetch/lsp/profile.rs` | 2 | LSP profile 参数测试 | clangd 默认后台索引、幂等补全与显式禁用策略优先 |
 | `src/fetch/lsp/symbol_names.rs` | 5 | LSP 方言适配单元测试 | server 识别、Rust inherent/trait impl、Pyrefly 点号限定名、非法 detail 降级、通用协议边界 |

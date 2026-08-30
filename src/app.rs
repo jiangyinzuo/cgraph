@@ -5,7 +5,7 @@
 
 use crate::{
     cli::{Cli, Command},
-    config::{FilterConfig, PathFilter, SymbolFilter},
+    config::FilterConfig,
     state::{HierarchyKind, NodeId, SymbolIdentity, Viewport, graph::RelationGraph},
 };
 
@@ -42,9 +42,7 @@ pub struct App {
     pub viewport: Viewport,
     pub canvas_notice: Option<String>,
     canvas_notice_is_error: bool,
-    symbol_filter: SymbolFilter,
     filters: FilterConfig,
-    path_filter: PathFilter,
     analysis_error: Option<String>,
     next_search_request_id: u64,
     next_hierarchy_request_id: u64,
@@ -80,11 +78,8 @@ impl App {
             viewport: Viewport::default(),
             canvas_notice: None,
             canvas_notice_is_error: false,
-            symbol_filter: SymbolFilter::default(),
             filters: FilterConfig::from_rules(std::iter::empty::<&str>(), false)
                 .expect("empty filter config is valid"),
-            path_filter: PathFilter::from_patterns(std::iter::empty::<&str>(), false)
-                .expect("empty path filter is valid"),
             analysis_error: None,
             next_search_request_id: 1,
             next_hierarchy_request_id: 1,
@@ -174,7 +169,7 @@ mod tests {
     use super::{App, SearchField, SearchItem, SearchKind, SearchStatus};
     use crate::{
         cli::Cli,
-        config::SymbolFilter,
+        config::FilterConfig,
         fetch::{CachePolicy, FetchSource, HierarchyResponse},
         state::{
             HierarchyDirection, HierarchyKind, LoadState, NodeId, SourceLocation, SymbolIdentity,
@@ -357,8 +352,8 @@ mod tests {
     #[test]
     fn applies_project_symbol_filter_to_search_and_hierarchy_results() {
         let mut app = App::from_cli(Cli::try_parse_from(["cgraph"]).unwrap());
-        app.set_symbol_filter(
-            SymbolFilter::from_patterns(["*::into", "Option::is_some", "*::Some"]).unwrap(),
+        app.set_filters(
+            FilterConfig::from_rules(["#*::into", "#Option::is_some", "#*::Some"], false).unwrap(),
         );
         let search = app.open_search(SearchKind::Call, true).unwrap();
         app.finish_search(

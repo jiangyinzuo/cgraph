@@ -4,15 +4,14 @@ pub mod lsp;
 pub mod treesitter;
 
 use lsp::{
-    HierarchyClient as LspHierarchyClient, LspProvider,
-    WorkspaceSymbolClient as LspWorkspaceSymbolClient,
+    HierarchyClient as LspHierarchyClient, WorkspaceSymbolClient as LspWorkspaceSymbolClient,
 };
 use treesitter::{
-    HierarchyClient as TreeSitterHierarchyClient, TreeSitterProvider,
+    HierarchyClient as TreeSitterHierarchyClient,
     WorkspaceSymbolClient as TreeSitterWorkspaceSymbolClient,
 };
 
-use crate::config::PathFilter;
+use crate::config::FilterConfig;
 use crate::state::{HierarchyDirection, SymbolIdentity};
 use tower_lsp::lsp_types::{Range, SymbolKind, Url};
 
@@ -68,19 +67,7 @@ pub enum WorkspaceSymbolClient {
 }
 
 impl WorkspaceSymbolClient {
-    pub fn set_workspace_only(&mut self, workspace_only: bool) {
-        if let Self::Lsp(client) = self {
-            client.set_workspace_only(workspace_only);
-        }
-    }
-
-    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
-        if let Self::Lsp(client) = self {
-            client.set_path_filter(path_filter);
-        }
-    }
-
-    pub fn set_filters(&mut self, filters: crate::config::FilterConfig) {
+    pub fn set_filters(&mut self, filters: FilterConfig) {
         if let Self::Lsp(client) = self {
             client.set_filters(filters);
         }
@@ -117,23 +104,7 @@ pub enum HierarchyClient {
 }
 
 impl HierarchyClient {
-    pub fn set_workspace_only(&mut self, workspace_only: bool) {
-        match self {
-            Self::Lsp(client) => client.set_workspace_only(workspace_only),
-            Self::TreeSitter(_) => {}
-            Self::Hybrid { lsp, .. } => lsp.set_workspace_only(workspace_only),
-        }
-    }
-
-    pub fn set_path_filter(&mut self, path_filter: PathFilter) {
-        match self {
-            Self::Lsp(client) => client.set_path_filter(path_filter),
-            Self::TreeSitter(_) => {}
-            Self::Hybrid { lsp, .. } => lsp.set_path_filter(path_filter),
-        }
-    }
-
-    pub fn set_filters(&mut self, filters: crate::config::FilterConfig) {
+    pub fn set_filters(&mut self, filters: FilterConfig) {
         match self {
             Self::Lsp(client) => client.set_filters(filters),
             Self::TreeSitter(_) => {}
@@ -169,74 +140,5 @@ impl From<LspHierarchyClient> for HierarchyClient {
 impl From<TreeSitterHierarchyClient> for HierarchyClient {
     fn from(client: TreeSitterHierarchyClient) -> Self {
         Self::TreeSitter(client)
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct FetchCoordinator {
-    lsp: Option<LspProvider>,
-    tree_sitter: Option<TreeSitterProvider>,
-}
-
-impl FetchCoordinator {
-    pub fn with_lsp(lsp: LspProvider) -> Self {
-        Self {
-            lsp: Some(lsp),
-            tree_sitter: None,
-        }
-    }
-
-    pub fn with_tree_sitter(tree_sitter: TreeSitterProvider) -> Self {
-        Self {
-            lsp: None,
-            tree_sitter: Some(tree_sitter),
-        }
-    }
-
-    pub fn lsp(&self) -> Option<&LspProvider> {
-        self.lsp.as_ref()
-    }
-
-    pub fn workspace_symbol_client(&self) -> Option<WorkspaceSymbolClient> {
-        self.lsp
-            .as_ref()
-            .map(LspProvider::workspace_symbol_client)
-            .map(WorkspaceSymbolClient::from)
-            .or_else(|| {
-                self.tree_sitter
-                    .as_ref()
-                    .map(TreeSitterProvider::workspace_symbol_client)
-                    .map(WorkspaceSymbolClient::from)
-            })
-    }
-
-    pub fn hierarchy_client(&self) -> Option<HierarchyClient> {
-        self.lsp
-            .as_ref()
-            .map(LspProvider::hierarchy_client)
-            .map(HierarchyClient::from)
-            .or_else(|| {
-                self.tree_sitter
-                    .as_ref()
-                    .map(TreeSitterProvider::hierarchy_client)
-                    .map(HierarchyClient::from)
-            })
-    }
-
-    pub async fn workspace_symbols(
-        &self,
-        query: &str,
-    ) -> anyhow::Result<Vec<WorkspaceSymbolMatch>> {
-        self.workspace_symbol_client()
-            .ok_or_else(|| anyhow::anyhow!("no workspace-symbol provider is configured"))?
-            .query(query)
-            .await
-    }
-
-    pub async fn hierarchy(&self, query: HierarchyQuery) -> anyhow::Result<HierarchyResponse> {
-        self.hierarchy_client()
-            .ok_or_else(|| anyhow::anyhow!("no hierarchy provider is configured"))?
-            .query(query)
-            .await
     }
 }

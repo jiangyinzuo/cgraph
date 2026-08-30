@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use tokio::{sync::watch, task};
-use tree_sitter::{Parser, Query, Tree};
+use tree_sitter::{Parser, Query};
 
 use crate::fetch::{HierarchyQuery, HierarchyResponse, WorkspaceSymbolMatch};
 
@@ -116,10 +116,6 @@ impl TreeSitterLanguage {
 /// directory traversal, candidate normalization and hierarchy confidence still
 /// need explicit provider semantics.
 pub struct TreeSitterProvider {
-    workspace_root: PathBuf,
-    language: TreeSitterLanguage,
-    parser: Parser,
-    symbol_query: Query,
     shared: Arc<SharedIndex>,
 }
 
@@ -161,8 +157,8 @@ impl std::fmt::Debug for TreeSitterProvider {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TreeSitterProvider")
-            .field("workspace_root", &self.workspace_root)
-            .field("language", &self.language)
+            .field("workspace_root", &self.shared.workspace_root)
+            .field("language", &self.shared.language)
             .finish_non_exhaustive()
     }
 }
@@ -175,7 +171,7 @@ impl TreeSitterProvider {
         parser
             .set_language(&grammar)
             .with_context(|| format!("failed to initialize {} grammar", language.name()))?;
-        let symbol_query = Query::new(&grammar, language.tags_query())
+        Query::new(&grammar, language.tags_query())
             .with_context(|| format!("failed to initialize {} symbol query", language.name()))?;
 
         Ok(Self {
@@ -189,29 +185,7 @@ impl TreeSitterProvider {
                 #[cfg(test)]
                 pause_build: std::sync::atomic::AtomicBool::new(false),
             }),
-            workspace_root,
-            language,
-            parser,
-            symbol_query,
         })
-    }
-
-    pub fn workspace_root(&self) -> &Path {
-        &self.workspace_root
-    }
-
-    pub fn language(&self) -> TreeSitterLanguage {
-        self.language
-    }
-
-    pub fn parse(&mut self, source: &str) -> Result<Tree> {
-        self.parser
-            .parse(source, None)
-            .with_context(|| format!("{} parser returned no syntax tree", self.language.name()))
-    }
-
-    pub fn symbol_capture_names(&self) -> &[&str] {
-        self.symbol_query.capture_names()
     }
 
     pub fn workspace_symbol_client(&self) -> WorkspaceSymbolClient {
@@ -388,23 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn initializes_and_parses_each_supported_grammar() {
+    fn initializes_each_supported_grammar_and_symbol_query() {
         let cases = [
-            (TreeSitterLanguage::Rust, "fn main() {}"),
-            (TreeSitterLanguage::C, "int main(void) { return 0; }"),
-            (TreeSitterLanguage::Cpp, "int main() { return 0; }"),
-            (TreeSitterLanguage::Python, "def main():\n    pass\n"),
+            TreeSitterLanguage::Rust,
+            TreeSitterLanguage::C,
+            TreeSitterLanguage::Cpp,
+            TreeSitterLanguage::Python,
         ];
 
-        for (language, source) in cases {
-            let mut provider = TreeSitterProvider::start(".", language).unwrap();
-            let tree = provider.parse(source).unwrap();
-            assert!(
-                !tree.root_node().has_error(),
-                "{} parse failed",
-                language.name()
-            );
-            assert!(!provider.symbol_capture_names().is_empty());
+        for language in cases {
+            TreeSitterProvider::start(".", language).unwrap();
         }
     }
 

@@ -14,28 +14,12 @@ pub mod filter;
 
 pub use filter::{
     FILTER_ALL, FILTER_WORKSPACE, FilterAction, FilterConfig, FilterPattern, FilterRule,
-    PathFilter, SymbolFilter,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProjectConfig {
     pub filters: FilterConfig,
-    pub symbol_filter: SymbolFilter,
-    pub path_filter: PathFilter,
-    pub workspace_only: bool,
     pub lsp: Option<LspSettings>,
-}
-
-impl Default for ProjectConfig {
-    fn default() -> Self {
-        Self {
-            filters: FilterConfig::default(),
-            symbol_filter: SymbolFilter::default(),
-            path_filter: PathFilter::default(),
-            workspace_only: true,
-            lsp: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -172,10 +156,7 @@ impl ProjectConfig {
         )
         .with_context(|| format!("{} contains invalid filters.rules", path.display()))?;
         Ok(Self {
-            filters: filter_config.clone(),
-            symbol_filter: filter_config.symbol_filter(),
-            path_filter: filter_config.path_filter(),
-            workspace_only: raw.filters.workspace_only,
+            filters: filter_config,
             lsp: raw
                 .lsp
                 .map(LspSettings::normalize)
@@ -241,13 +222,18 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{LspSettings, ProjectConfig, SymbolFilter};
+    use super::{FilterConfig, LspSettings, ProjectConfig};
 
     #[test]
     fn loads_and_normalizes_project_local_symbol_filters() {
         let workspace = temporary_workspace("load");
         assert_eq!(ProjectConfig::load(&workspace).unwrap(), Default::default());
-        assert!(ProjectConfig::load(&workspace).unwrap().workspace_only);
+        assert!(
+            ProjectConfig::load(&workspace)
+                .unwrap()
+                .filters
+                .workspace_only()
+        );
         let path = ProjectConfig::create_if_missing(&workspace).unwrap();
         assert_eq!(path, workspace.join(".cgraph.toml"));
         assert_eq!(ProjectConfig::load(&workspace).unwrap(), Default::default());
@@ -266,7 +252,7 @@ mod tests {
 
         let config = ProjectConfig::load(&workspace).unwrap();
 
-        assert!(!config.workspace_only);
+        assert!(!config.filters.workspace_only());
         assert_eq!(
             config.lsp,
             Some(LspSettings {
@@ -284,15 +270,15 @@ mod tests {
         .unwrap();
         let config = ProjectConfig::load(&workspace).unwrap();
         assert_eq!(config.lsp.map(|lsp| lsp.name), Some("clangd".to_owned()));
-        assert!(config.symbol_filter.is_ignored("Vec::into"));
-        assert!(config.symbol_filter.is_ignored("Option::is_some"));
-        assert!(config.symbol_filter.is_ignored("Option::Some"));
-        assert!(!config.symbol_filter.is_ignored("is_some"));
-        assert!(!config.symbol_filter.is_ignored("Option::some"));
+        assert!(config.filters.is_ignored_symbol("Vec::into"));
+        assert!(config.filters.is_ignored_symbol("Option::is_some"));
+        assert!(config.filters.is_ignored_symbol("Option::Some"));
+        assert!(!config.filters.is_ignored_symbol("is_some"));
+        assert!(!config.filters.is_ignored_symbol("Option::some"));
         assert!(
-            SymbolFilter::from_patterns(["*选*::方*"])
+            FilterConfig::from_rules(["#*选*::方*"], false)
                 .unwrap()
-                .is_ignored("可选项::方法")
+                .is_ignored_symbol("可选项::方法")
         );
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -358,13 +344,13 @@ mod tests {
         let config = ProjectConfig::load(&workspace).unwrap();
         assert!(
             config
-                .path_filter
-                .is_ignored(&workspace.join("src/generated/file.rs"), &workspace)
+                .filters
+                .is_ignored_path(&workspace.join("src/generated/file.rs"), &workspace)
         );
         assert!(
             !config
-                .path_filter
-                .is_ignored(&workspace.join("src/generated/keep.rs"), &workspace)
+                .filters
+                .is_ignored_path(&workspace.join("src/generated/keep.rs"), &workspace)
         );
         fs::remove_dir_all(workspace).unwrap();
     }
