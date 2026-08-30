@@ -3,6 +3,7 @@
 //! The transport is implemented locally because `tower-lsp` supplies protocol
 //! types and server infrastructure, but cgraph needs to act as an LSP client.
 
+mod capabilities;
 mod clangd;
 mod framing;
 mod normalize;
@@ -39,17 +40,14 @@ use tokio::{
     time::timeout,
 };
 use tower_lsp::lsp_types::{
-    CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
-    CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, CallHierarchyServerCapability, ClientCapabilities, ClientInfo,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolClientCapabilities,
-    DocumentSymbolParams, DocumentSymbolResponse, GeneralClientCapabilities, InitializeParams,
-    InitializeResult, OneOf, PartialResultParams, Position, PositionEncodingKind, ServerInfo,
-    SymbolKind, TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TypeHierarchyClientCapabilities, TypeHierarchyItem,
-    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Url,
-    WindowClientCapabilities, WorkDoneProgressParams, WorkspaceClientCapabilities, WorkspaceFolder,
-    WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
+    ClientInfo, DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams,
+    DocumentSymbolResponse, InitializeParams, InitializeResult, PartialResultParams, Position,
+    ServerInfo, SymbolKind, TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, Url, WorkDoneProgressParams, WorkspaceFolder,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
     request::{
         CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
         DocumentSymbolRequest, Initialize, Request, Shutdown, TypeHierarchyPrepare,
@@ -61,6 +59,10 @@ use crate::{
     config::{FilterConfig, PathFilter},
     fetch::{FetchSource, HierarchyQuery, HierarchyResponse},
     state::{HierarchyDirection, HierarchyKind, SourceLocation, SymbolIdentity},
+};
+use capabilities::{
+    call_hierarchy_supported, client_capabilities, requested_configuration, uses_utf16_positions,
+    workspace_symbol_initialization_options, workspace_symbol_supported,
 };
 use framing::{read_message, write_message};
 use normalize::{
@@ -837,42 +839,6 @@ impl LspProvider {
     }
 }
 
-fn client_capabilities() -> ClientCapabilities {
-    ClientCapabilities {
-        text_document: Some(TextDocumentClientCapabilities {
-            call_hierarchy: Some(CallHierarchyClientCapabilities {
-                dynamic_registration: Some(true),
-            }),
-            document_symbol: Some(DocumentSymbolClientCapabilities::default()),
-            type_hierarchy: Some(TypeHierarchyClientCapabilities {
-                dynamic_registration: Some(true),
-            }),
-            ..TextDocumentClientCapabilities::default()
-        }),
-        workspace: Some(WorkspaceClientCapabilities {
-            symbol: Some(WorkspaceSymbolClientCapabilities::default()),
-            workspace_folders: Some(true),
-            configuration: Some(true),
-            ..WorkspaceClientCapabilities::default()
-        }),
-        window: Some(WindowClientCapabilities {
-            work_done_progress: Some(true),
-            ..WindowClientCapabilities::default()
-        }),
-        general: Some(GeneralClientCapabilities {
-            position_encodings: Some(vec![PositionEncodingKind::UTF16]),
-            ..GeneralClientCapabilities::default()
-        }),
-        experimental: Some(json!({
-            "serverStatusNotification": true,
-        })),
-    }
-}
-
-fn uses_utf16_positions(position_encoding: Option<&PositionEncodingKind>) -> bool {
-    position_encoding.is_none_or(|encoding| encoding == &PositionEncodingKind::UTF16)
-}
-
 #[derive(Clone)]
 struct JsonRpcClient {
     commands: mpsc::Sender<JsonRpcCommand>,
@@ -1388,25 +1354,6 @@ fn unregister_hierarchy_capabilities(message: &Value, capabilities: &ServerHiera
     }
 }
 
-fn requested_configuration(section: Option<&str>) -> Value {
-    match section {
-        Some("rust-analyzer") => json!({
-            "workspace": {
-                "symbol": {
-                    "search": {
-                        "kind": "all_symbols",
-                        "scope": "workspace",
-                    }
-                }
-            }
-        }),
-        Some("rust-analyzer.workspace.symbol.search.kind") => json!("all_symbols"),
-        Some("rust-analyzer.workspace.symbol.search.scope") => json!("workspace"),
-        Some("python") => json!({}),
-        _ => Value::Null,
-    }
-}
-
 fn workspace_name(workspace_root: &Path) -> String {
     workspace_root
         .file_name()
@@ -1428,62 +1375,6 @@ fn language_id_for_path(path: &Path) -> Option<&'static str> {
         Some("cc") | Some("cpp") | Some("cxx") | Some("h") | Some("hh") | Some("hpp")
         | Some("hxx") | Some("ixx") | Some("cppm") => Some("cpp"),
         _ => None,
-    }
-}
-
-fn workspace_symbol_supported(initialize_result: &InitializeResult) -> bool {
-    match &initialize_result.capabilities.workspace_symbol_provider {
-        Some(OneOf::Left(supported)) => *supported,
-        Some(OneOf::Right(_)) => true,
-        None => false,
-    }
-}
-
-fn call_hierarchy_supported(initialize_result: &InitializeResult) -> bool {
-    match initialize_result.capabilities.call_hierarchy_provider {
-        Some(CallHierarchyServerCapability::Simple(supported)) => supported,
-        Some(CallHierarchyServerCapability::Options(_)) => true,
-        None => false,
-    }
-}
-
-fn workspace_symbol_initialization_options(
-    program: &OsStr,
-    server_name: Option<&str>,
-    options: Option<Value>,
-) -> Option<Value> {
-    let profile = server_name
-        .map(server_profile_from_name)
-        .unwrap_or_else(|| server_profile_from_program(program));
-    if profile != ServerProfile::RustAnalyzer {
-        return options;
-    }
-
-    let mut options = options.unwrap_or_else(|| json!({}));
-    merge_json(
-        &mut options,
-        json!({
-            "workspace": {
-                "symbol": {
-                    "search": {
-                        "kind": "all_symbols",
-                        "scope": "workspace",
-                    }
-                }
-            }
-        }),
-    );
-    Some(options)
-}
-
-fn merge_json(target: &mut Value, overlay: Value) {
-    match (target, overlay) {
-        (Value::Object(target), Value::Object(overlay)) => {
-            for (key, value) in overlay {
-                merge_json(target.entry(key).or_insert(Value::Null), value);
-            }
-        }
-        (target, overlay) => *target = overlay,
     }
 }
 
