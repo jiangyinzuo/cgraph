@@ -2,7 +2,9 @@
 
 ## 模块边界
 
-LSP 实现按职责拆分为几个窄模块：`profile.rs` 只描述可执行文件到内置 server profile 的映射、默认文件后缀和命令行补全；`symbol_names.rs` 负责不同语言服务器的显示名适配；`normalize.rs` 负责 workspace symbol、document symbol 和 hierarchy item 的协议结果归一化、范围过滤与去重；上层 `lsp.rs` 仅保留 provider 生命周期、查询编排和 JSON-RPC actor。新增 server 特性应优先放入对应边界，避免再次把协议细节堆回 provider。
+LSP 实现按变化原因拆分为窄模块：`settings.rs` 构造公开的 `LspConfig`；`profile.rs` 描述 server profile、默认文件后缀和命令行补全；`capabilities.rs` 维护 initialize capability、rust-analyzer 配置响应和动态 hierarchy capability；`framing.rs` 只读写带 `Content-Length` 的 JSON 消息并执行大小限制；`documents.rs` 管理按需 `didOpen`、会话内打开集合和 shutdown 前的 `didClose`；`progress.rs` 归一化状态事件；`symbol_names.rs` 负责语言服务器显示名适配；`normalize.rs` 负责 workspace/document symbol 与 hierarchy item 的协议结果归一化、范围过滤和去重。上层 `lsp.rs` 仍负责 provider 生命周期、查询编排和 JSON-RPC actor，不应重新吸收这些策略。
+
+这些模块不是抽象层级的重复包装：配置和 capability policy 可以在不接触 I/O actor 的情况下演进，framing 的安全限制不依赖具体 LSP 请求，文档 overlay 生命周期也不会与 request-id 路由混在同一个实现块中。新增 server 方言优先进入 profile、bootstrap 或 name adapter；新增通用请求才进入 provider/query 编排。
 
 LSP 对符号名称的标准化程度并不一致。`workspace/symbol` 的 `containerName` 明确表示符号所属容器，但 `CallHierarchyItem.detail` 只是供界面展示的任意文本；clangd、rust-analyzer、Pyrefly 和语言服务器包装器可能返回完全不同的格式。cgraph 因此不能用一个字符串启发式同时解释所有语言。
 

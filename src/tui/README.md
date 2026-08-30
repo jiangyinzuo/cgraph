@@ -2,7 +2,7 @@
 
 TUI 层把终端事件转换为 App 状态迁移，并把 App 渲染为 Ratatui widgets。业务不变量应尽量留在 App/State，TUI 只处理输入语义、坐标映射和视觉表现。
 
-代码按变化原因拆分：`mod.rs` 保存事件循环、画布键鼠控制器和顶层渲染编排；`search.rs` 集中搜索防抖查询、输入、鼠标映射与弹窗渲染；`save.rs` 负责保存弹窗；`help.rs` 维护完整帮助内容、滚动和渲染；`config_editor.rs` 选择并启动外部编辑器；`canvas.rs` 负责世界布局、viewport 投影与完整矩形碰撞，其 `canvas/connections.rs` 子模块负责连线路由和字形。这样搜索、帮助、编辑器生命周期、节点布局和保存错误可以独立变化。
+代码按变化原因拆分：`mod.rs` 保存事件循环、画布键鼠控制器和顶层渲染编排；`terminal.rs` 独占 raw mode、备用屏幕、鼠标捕获与 OSC 52；`status.rs` 负责 LSP 状态到 App 状态的映射及 footer 表示；`search.rs` 集中搜索防抖查询、输入、鼠标映射与弹窗渲染；`save.rs` 负责保存弹窗；`help.rs` 维护完整帮助内容、滚动和渲染；`config_editor.rs` 选择并启动外部编辑器；`canvas.rs` 负责世界布局、viewport 投影与完整矩形碰撞，其 `canvas/connections.rs` 子模块负责连线路由和字形。这样终端副作用、分析状态、搜索、帮助、编辑器生命周期、节点布局和保存错误可以独立变化。
 
 相关产品规范：[REQ-2 分析后端状态](../../requirements/REQ-2-analysis-status/README.md)、[REQ-4 画布与导航](../../requirements/REQ-4-canvas-navigation/README.md)、[REQ-5 符号与图入口管理](../../requirements/REQ-5-symbol-management/README.md)、[REQ-6 进程间通信](../../requirements/REQ-6-ipc/README.md)、[REQ-9 项目配置](../../requirements/REQ-9-project-configuration/README.md)。本文件解释实现理由，不替代这些需求的验收条件。
 

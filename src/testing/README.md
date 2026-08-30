@@ -89,6 +89,8 @@ total: 146
 
 App 测试把异步 I/O 表示为显式请求和显式完成事件：先调用状态迁移取得 request，再注入成功或失败结果。这样可以确定性地覆盖真实 UI 最容易出错的竞态，而不需要 sleep。
 
+生产实现已经按 `app/search.rs`、`app/hierarchy.rs`、`app/analysis.rs` 和 `app/messages.rs` 拆分，但现有跨状态回归测试仍集中在 `app.rs` 的父模块中，以便同时访问组合后的 `App`。只有当某组测试不再需要跨状态断言时才迁往子模块；不能仅为缩短测试文件而复制 fixture 或降低端到端状态覆盖。
+
 Hierarchy 测试重点验证：
 
 - 首次展开只生成目标方向的一个请求。
@@ -121,6 +123,8 @@ LSP 测试使用 `tokio::io::duplex` 连接真实 `JsonRpcClient` actor 与测�
 - 空 workspace-symbol 响应产生包含 query、候选数、过滤后数量和耗时的诊断事件。
 
 LSP profile 单元测试固定 clangd 默认 `--background-index`、重复应用的幂等性和显式 `--no-background-index` 优先级。主程序组装测试固定默认 `/tmp/cgraph-<server>-<pid>.log` 命名和项目日志覆盖；TUI 测试确认诊断进入消息历史但不把 Ready 状态改成 Warning/Error。
+
+LSP 生产代码中的 `settings`、`capabilities`、`framing`、`documents` 和 `progress` 是职责模块，而协议集成测试仍从父模块驱动真实 actor。这样测试继续覆盖模块拼装后的请求顺序、取消和文档生命周期，不把重构后的内部函数调用当成用户行为替代品。
 
 模拟 server 仍是稳定、快速且不依赖本机工具链的主要协议测试。另有三个条件执行的真实 server 测试：`pyrefly` 位于 `PATH` 时验证 `pyrefly lsp`、受控 `didOpen` 索引引导、workspace symbol、incoming call hierarchy、Python type hierarchy（服务端不提供时走真实 Tree-sitter fallback）和 `Worker.run` 名称；`rust-analyzer` 位于 `PATH` 时验证最小 Cargo workspace、workspace symbol、outgoing call hierarchy 和 Rust type hierarchy fallback，并在索引尚未稳定而返回 `content modified` 时于总超时内重试；`clangd` 位于 `PATH` 时验证带 `compile_commands.json` 的 C++ 工作区、默认启动参数、workspace symbol、头文件中的 `Worker::run` outgoing call hierarchy、C++ type hierarchy（服务端不提供时走真实 Tree-sitter fallback）、`main` 函数，以及 workspace symbol 位于未 bootstrap 头文件时并发 incoming/outgoing hierarchy 会先按需 `didOpen` 且分别返回正确结果。对应命令不存在或 `--version` 失败时，测试打印跳过原因并返回，不让缺少可选开发工具的普通 CI 失败。
 
