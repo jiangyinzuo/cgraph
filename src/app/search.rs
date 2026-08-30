@@ -1,5 +1,5 @@
 use super::fuzzy;
-use super::{App, candidate_is_visible};
+use super::{App, filtering::candidate_is_visible};
 use crate::state::{HierarchyKind, SourceLocation, SymbolIdentity, Viewport};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
