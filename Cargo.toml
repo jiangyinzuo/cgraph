@@ -2,7 +2,7 @@
 name = "call-graph-cli"
 version = "0.6.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 description = "Interactive call and type hierarchy TUI"
 authors = ["Yinzuo Jiang"]
 license = "MIT"
